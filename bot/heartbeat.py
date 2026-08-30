@@ -4,7 +4,7 @@ from .state.router import StateRouter, AgentState
 from .api.client import APIClient
 from .game.websocket import GameWebSocket
 from .strategy.loadout import LoadoutManager
-from .strategy.adaptive_ai import AdaptiveAI
+from .strategy.adaptive_ai import AdaptiveAI  # ← GANTI dari GameStrategy ke AdaptiveAI
 from .utils.logger import logger
 from .config import Config
 
@@ -14,7 +14,7 @@ class Heartbeat:
         self.client = APIClient()
         self.loadout_manager = LoadoutManager()
         self.websocket = None
-        self.strategy = AdaptiveAI(self.websocket)
+        self.strategy = None
         self.running = True
         self.login_attempted = False
         self.reconnect_attempts = 0
@@ -44,7 +44,6 @@ class Heartbeat:
             logger.error("❌ API_KEY is not configured!")
             return
         
-        # 🔥 Skip auto-setup, langsung force join jika freeReady None
         if not self.setup_attempted:
             await self._auto_setup()
         
@@ -79,7 +78,6 @@ class Heartbeat:
                     await asyncio.sleep(5)
                     continue
                 
-                # 🔥 FORCE JOIN: Jika freeReady None dan belum force join
                 if not self.force_join_attempted and self.client.account_data:
                     free_ready = self.client.account_data.get("readiness", {}).get("freeReady")
                     if free_ready is None or free_ready == False:
@@ -88,7 +86,6 @@ class Heartbeat:
                         self.force_join_attempted = True
                         continue
                 
-                # Jika game ended, refresh state dan cari game baru
                 if self.game_ended:
                     logger.info("🔄 Game ended - refreshing state and searching for next game...")
                     self.game_ended = False
@@ -114,7 +111,6 @@ class Heartbeat:
                             self.join_attempts = 0
                     continue
                 
-                # Normal state check
                 if self.idle_refresh_count >= self.max_idle_refresh:
                     logger.info("🔄 Refreshing state (idle too long)...")
                     await self._force_refresh_state()
@@ -164,7 +160,6 @@ class Heartbeat:
                 self.reconnect_attempts = min(self.reconnect_attempts + 1, 5)
     
     async def _force_refresh_state(self):
-        """Paksa refresh state dengan invalidate cache"""
         logger.debug("🔄 Forcing state refresh...")
         try:
             self.client.account_data = None
@@ -188,7 +183,6 @@ class Heartbeat:
             logger.error(f"❌ Force refresh error: {e}")
     
     async def _find_and_join_game(self) -> bool:
-        """Cari dan join game dengan retry"""
         logger.info("🔍 Searching for available game...")
         
         try:
@@ -256,7 +250,6 @@ class Heartbeat:
                 self.client.is_logged_in = True
                 self.login_attempted = True
                 
-                # 🔥 Jika freeReady None, langsung force join
                 if free_ready is None and not self.force_join_attempted:
                     logger.info("🔧 freeReady is None - will force join...")
             else:
@@ -268,7 +261,6 @@ class Heartbeat:
             self.login_attempted = True
     
     async def _auto_setup(self):
-        """Auto setup - skip redeem, langsung force join"""
         logger.info("🔧 Auto-setup: Checking account readiness...")
         self.setup_attempted = True
         
@@ -288,7 +280,6 @@ class Heartbeat:
             
             logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
             
-            # 🔥 SKIP REDEEM - langsung force join
             if free_ready is None or free_ready == False:
                 logger.info("   🔧 freeReady not available - skipping setup and forcing join...")
                 await self._force_join_free()
@@ -298,16 +289,13 @@ class Heartbeat:
             logger.error(f"❌ Auto-setup error: {e}")
     
     async def _force_join_free(self):
-        """Force join free room - langsung connect tanpa readiness"""
         logger.info("🔧 Force joining free room (bypassing readiness check)...")
         
-        # 🔥 Reset state sebelum force join
         self.force_join_attempted = True
         
         max_force_attempts = 3
         for attempt in range(max_force_attempts):
             try:
-                # Buat WebSocket baru
                 self.websocket = GameWebSocket()
                 connected = await self.websocket.connect("free")
                 
@@ -318,8 +306,8 @@ class Heartbeat:
                     self.join_attempts = 0
                     self.idle_refresh_count = 0
                     
-                    # Start gameplay
-                    self.strategy = GameStrategy(self.websocket)
+                    # 🔥 GUNAKAN AdaptiveAI BUKAN GameStrategy
+                    self.strategy = AdaptiveAI(self.websocket)
                     await self.websocket.receive_loop(self.strategy.handle_message)
                     
                     await self._cleanup()
@@ -340,11 +328,9 @@ class Heartbeat:
         logger.error("❌ All force join attempts failed")
         self.game_ended = False
         self.join_attempts = 0
-        # 🔥 Jika force join gagal, tunggu dan retry nanti
         await asyncio.sleep(10)
     
     async def _handle_reconnect(self):
-        """Auto reconnect dengan exponential backoff"""
         if self.reconnect_attempts > self.max_reconnect_attempts:
             logger.warning(f"⚠️ Max reconnect attempts reached")
             self.reconnect_attempts = 0
@@ -381,7 +367,8 @@ class Heartbeat:
                         self.join_attempts = 0
                         self.idle_refresh_count = 0
                         
-                        self.strategy = GameStrategy(self.websocket)
+                        # 🔥 GUNAKAN AdaptiveAI BUKAN GameStrategy
+                        self.strategy = AdaptiveAI(self.websocket)
                         await self.websocket.receive_loop(self.strategy.handle_message)
                         
                         await self._cleanup()
@@ -397,7 +384,6 @@ class Heartbeat:
             logger.error(f"❌ Reconnect error: {e}")
     
     async def _handle_game(self, entry_type: str):
-        """Resume existing game"""
         logger.info(f"📌 Resuming {entry_type} game...")
         self.reconnect_attempts = 0
         self.game_ended = False
@@ -415,7 +401,8 @@ class Heartbeat:
             self.last_game_id = self.websocket.game_id
             logger.info(f"✅ Resumed game: {self.last_game_id}")
             
-            self.strategy = GameStrategy(self.websocket)
+            # 🔥 GUNAKAN AdaptiveAI BUKAN GameStrategy
+            self.strategy = AdaptiveAI(self.websocket)
             await self.websocket.receive_loop(self.strategy.handle_message)
             
         except Exception as e:
@@ -426,7 +413,6 @@ class Heartbeat:
             logger.info(f"✅ {entry_type} game ended - will search for next game")
     
     async def _handle_start_game(self, entry_type: str):
-        """Start new game"""
         logger.info(f"🎯 Starting new {entry_type} game...")
         self.reconnect_attempts = 0
         self.game_ended = False
@@ -459,7 +445,6 @@ class Heartbeat:
             logger.info(f"✅ Game ended - will search for next game")
     
     async def _try_join(self, entry_type: str) -> bool:
-        """Try to join a game"""
         logger.info(f"📦 Checking loadout...")
         await self.loadout_manager.configure_full_loadout()
         
@@ -475,13 +460,13 @@ class Heartbeat:
         logger.info(f"✅ Joined {entry_type} game: {self.last_game_id}")
         
         logger.info("🎮 Starting gameplay...")
-        self.strategy = GameStrategy(self.websocket)
+        # 🔥 GUNAKAN AdaptiveAI BUKAN GameStrategy
+        self.strategy = AdaptiveAI(self.websocket)
         await self.websocket.receive_loop(self.strategy.handle_message)
         
         return True
     
     async def _cleanup(self):
-        """Cleanup WebSocket"""
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
