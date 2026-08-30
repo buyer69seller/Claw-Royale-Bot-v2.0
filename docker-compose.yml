@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  claw-bot:
+    build: .
+    container_name: claw-royale-bot
+    environment:
+      - API_KEY=${API_KEY}
+      - AGENT_NAME=${AGENT_NAME:-ClawBot}
+      - ROOM_MODE=${ROOM_MODE:-free}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - WEB_PORT=8080
+      - DATA_PATH=/app/data
+    volumes:
+      - claw-data:/app/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  claw-data:
