@@ -17,20 +17,15 @@ class GameWebSocket:
         self.max_reconnect_attempts = 5
         self.base_backoff = 1
         self.max_backoff = 30
+        self.on_game_ended = None  # Callback untuk notifikasi game ended
         
     async def connect(self, entry_type: str = "free") -> bool:
-        """
-        Connect ke Claw Royale via /ws/join
-        Kompatibel dengan semua versi websockets
-        """
+        """Connect ke Claw Royale via /ws/join"""
         try:
             version = await self.client.get_version()
             if not version:
                 version = "1.15.0"
             
-            # Build headers sebagai dict
-            # Untuk websockets versi lama, gunakan extra_headers dengan list of tuples
-            # Untuk versi baru, bisa pakai headers dict
             headers = {
                 "X-API-Key": Config.API_KEY,
                 "X-Version": version,
@@ -40,55 +35,38 @@ class GameWebSocket:
             logger.info(f"🔌 Connecting to {Config.WS_JOIN_URL}")
             logger.debug(f"   X-Version: {version}")
             
-            # Method 1: Coba dengan extra_headers (versi baru)
+            # Try multiple connection methods for compatibility
             try:
-                # Untuk websockets >= 10.0
-                import websockets as ws
-                if hasattr(ws, '__version__'):
-                    # Versi baru support extra_headers sebagai dict
-                    self.websocket = await websockets.connect(
-                        Config.WS_JOIN_URL,
-                        extra_headers=headers,
-                        max_size=10_000_000,
-                        ping_interval=20,
-                        ping_timeout=60,
-                        close_timeout=10
-                    )
+                self.websocket = await websockets.connect(
+                    Config.WS_JOIN_URL,
+                    extra_headers=headers,
+                    max_size=10_000_000,
+                    ping_interval=20,
+                    ping_timeout=60,
+                    close_timeout=10
+                )
             except TypeError:
-                # Method 2: Fallback untuk versi lama
-                # Untuk websockets < 10.0, gunakan parameter yang berbeda
                 try:
                     self.websocket = await websockets.connect(
                         Config.WS_JOIN_URL,
-                        headers=headers,  # Beberapa versi support headers
+                        headers=headers,
                         max_size=10_000_000,
                         ping_interval=20,
                         ping_timeout=60
                     )
                 except TypeError:
-                    # Method 3: Gunakan additional_headers (versi 9.x)
-                    try:
-                        self.websocket = await websockets.connect(
-                            Config.WS_JOIN_URL,
-                            additional_headers=headers,
-                            max_size=10_000_000,
-                            ping_interval=20,
-                            ping_timeout=60
-                        )
-                    except TypeError:
-                        # Method 4: Gunakan subprotocols dan extra_headers sebagai list of tuples
-                        extra_headers_list = [
-                            ("X-API-Key", Config.API_KEY),
-                            ("X-Version", version),
-                            ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
-                        ]
-                        self.websocket = await websockets.connect(
-                            Config.WS_JOIN_URL,
-                            extra_headers=extra_headers_list,
-                            max_size=10_000_000,
-                            ping_interval=20,
-                            ping_timeout=60
-                        )
+                    extra_headers_list = [
+                        ("X-API-Key", Config.API_KEY),
+                        ("X-Version", version),
+                        ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
+                    ]
+                    self.websocket = await websockets.connect(
+                        Config.WS_JOIN_URL,
+                        extra_headers=extra_headers_list,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
             
             logger.info("   ✅ WebSocket connected")
             
@@ -140,64 +118,6 @@ class GameWebSocket:
             logger.error(f"❌ Connection error: {e}")
             return False
     
-    async def resume_game(self, entry_type: str) -> bool:
-        """Resume game yang sudah ada via /ws/agent"""
-        try:
-            version = await self.client.get_version()
-            if not version:
-                version = "1.15.0"
-            
-            headers = {
-                "X-API-Key": Config.API_KEY,
-                "X-Version": version,
-                "User-Agent": f"ClawRoyaleBot/{Config.AGENT_NAME}"
-            }
-            
-            logger.info(f"🔌 Resuming {entry_type} game at {Config.WS_AGENT_URL}")
-            
-            # Coba berbagai metode
-            try:
-                self.websocket = await websockets.connect(
-                    Config.WS_AGENT_URL,
-                    extra_headers=headers,
-                    max_size=10_000_000,
-                    ping_interval=20,
-                    ping_timeout=60,
-                    close_timeout=10
-                )
-            except TypeError:
-                try:
-                    self.websocket = await websockets.connect(
-                        Config.WS_AGENT_URL,
-                        headers=headers,
-                        max_size=10_000_000,
-                        ping_interval=20,
-                        ping_timeout=60
-                    )
-                except TypeError:
-                    extra_headers_list = [
-                        ("X-API-Key", Config.API_KEY),
-                        ("X-Version", version),
-                        ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
-                    ]
-                    self.websocket = await websockets.connect(
-                        Config.WS_AGENT_URL,
-                        extra_headers=extra_headers_list,
-                        max_size=10_000_000,
-                        ping_interval=20,
-                        ping_timeout=60
-                    )
-            
-            self.connected = True
-            self.is_alive = True
-            self.reconnect_attempts = 0
-            logger.info("   ✅ Resumed successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Resume error: {e}")
-            return False
-    
     async def receive_loop(self, message_handler: Callable):
         """Main receive loop dengan exponential backoff"""
         logger.info("🔄 Receive loop started")
@@ -208,7 +128,7 @@ class GameWebSocket:
                     msg = json.loads(await asyncio.wait_for(self.websocket.recv(), timeout=30.0))
                     msg_type = msg.get("type")
                     
-                    # Log message types (reduced noise)
+                    # Log message types
                     if msg_type in ["agent_view", "turn_advanced"]:
                         logger.debug(f"📨 {msg_type}")
                     elif msg_type == "action_result":
@@ -223,14 +143,22 @@ class GameWebSocket:
                         if meta.get("youDied") == True:
                             logger.info("💀 YOU DIED!")
                             self.is_alive = False
+                            self.connected = False
                             await message_handler(msg)
+                            # Notify that game ended
+                            if self.on_game_ended:
+                                self.on_game_ended()
                             break
                         else:
                             logger.info(f"💀 Agent died: {msg.get('agentId')}")
                     elif msg_type == "game_ended":
                         logger.info("🏁 GAME ENDED")
                         self.is_alive = False
+                        self.connected = False
                         await message_handler(msg)
+                        # Notify that game ended
+                        if self.on_game_ended:
+                            self.on_game_ended()
                         break
                     else:
                         logger.debug(f"📨 {msg_type}")
@@ -254,6 +182,9 @@ class GameWebSocket:
                                 self.reconnect_attempts = 0
                         else:
                             logger.error("❌ Max reconnect attempts reached")
+                            # Notify that game ended (connection lost)
+                            if self.on_game_ended:
+                                self.on_game_ended()
                             break
                     continue
                     
@@ -261,97 +192,14 @@ class GameWebSocket:
             logger.error(f"❌ WebSocket error: {e}")
             if self.reconnect_attempts < self.max_reconnect_attempts:
                 await self._reconnect()
+            else:
+                if self.on_game_ended:
+                    self.on_game_ended()
         except Exception as e:
             logger.error(f"❌ Receive error: {e}")
+            if self.on_game_ended:
+                self.on_game_ended()
         finally:
             self.is_alive = False
             self.connected = False
             logger.info("🔄 Receive loop ended")
-    
-    async def _reconnect(self):
-        """Reconnect dengan exponential backoff"""
-        try:
-            if self.websocket:
-                await self.websocket.close()
-                self.websocket = None
-            
-            await asyncio.sleep(2)
-            
-            version = await self.client.get_version()
-            if not version:
-                version = "1.15.0"
-            
-            headers = {
-                "X-API-Key": Config.API_KEY,
-                "X-Version": version,
-                "User-Agent": f"ClawRoyaleBot/{Config.AGENT_NAME}"
-            }
-            
-            try:
-                self.websocket = await websockets.connect(
-                    Config.WS_AGENT_URL,
-                    extra_headers=headers,
-                    max_size=10_000_000,
-                    ping_interval=20,
-                    ping_timeout=60,
-                    close_timeout=10
-                )
-            except TypeError:
-                try:
-                    self.websocket = await websockets.connect(
-                        Config.WS_AGENT_URL,
-                        headers=headers,
-                        max_size=10_000_000,
-                        ping_interval=20,
-                        ping_timeout=60
-                    )
-                except TypeError:
-                    extra_headers_list = [
-                        ("X-API-Key", Config.API_KEY),
-                        ("X-Version", version),
-                        ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
-                    ]
-                    self.websocket = await websockets.connect(
-                        Config.WS_AGENT_URL,
-                        extra_headers=extra_headers_list,
-                        max_size=10_000_000,
-                        ping_interval=20,
-                        ping_timeout=60
-                    )
-            
-            self.connected = True
-            self.is_alive = True
-            logger.info("✅ Reconnected successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Reconnect failed: {e}")
-    
-    async def send_action(self, action: Dict) -> bool:
-        """Send action ke game"""
-        try:
-            if not self.websocket or not self.is_alive or not self.connected:
-                logger.warning("⚠️ Cannot send action: not connected or dead")
-                return False
-            
-            action_type = action.get("type")
-            logger.debug(f"📤 Action: {action_type}")
-            
-            await self.websocket.send(json.dumps(action))
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Send action error: {e}")
-            return False
-    
-    async def close(self):
-        """Close WebSocket connection"""
-        self.connected = False
-        self.is_alive = False
-        
-        if self.websocket:
-            try:
-                await self.websocket.close()
-                logger.info("🔌 WebSocket closed")
-            except Exception as e:
-                logger.warning(f"Error closing WebSocket: {e}")
-            self.websocket = None
