@@ -4,7 +4,7 @@ from .state.router import StateRouter, AgentState
 from .api.client import APIClient
 from .game.websocket import GameWebSocket
 from .strategy.loadout import LoadoutManager
-from .strategy.gameplay import GameStrategy
+from .strategy.adaptive_ai import AdaptiveAI
 from .utils.logger import logger
 from .config import Config
 
@@ -14,7 +14,7 @@ class Heartbeat:
         self.client = APIClient()
         self.loadout_manager = LoadoutManager()
         self.websocket = None
-        self.strategy = None
+        self.strategy = AdaptiveAI(self.websocket)
         self.running = True
         self.login_attempted = False
         self.reconnect_attempts = 0
