@@ -21,39 +21,74 @@ class GameWebSocket:
     async def connect(self, entry_type: str = "free") -> bool:
         """
         Connect ke Claw Royale via /ws/join
-        Menggunakan headers yang benar untuk websockets
+        Kompatibel dengan semua versi websockets
         """
         try:
             version = await self.client.get_version()
             if not version:
                 version = "1.15.0"
             
-            # Headers sebagai dict untuk websockets
+            # Build headers sebagai dict
+            # Untuk websockets versi lama, gunakan extra_headers dengan list of tuples
+            # Untuk versi baru, bisa pakai headers dict
             headers = {
                 "X-API-Key": Config.API_KEY,
                 "X-Version": version,
                 "User-Agent": f"ClawRoyaleBot/{Config.AGENT_NAME}"
             }
             
-            # Build extra_headers sebagai list of tuples untuk kompatibilitas
-            extra_headers = [
-                ("X-API-Key", Config.API_KEY),
-                ("X-Version", version),
-                ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
-            ]
-            
             logger.info(f"🔌 Connecting to {Config.WS_JOIN_URL}")
-            logger.debug(f"   Headers: X-Version={version}, X-API-Key={Config.API_KEY[:8]}...")
+            logger.debug(f"   X-Version: {version}")
             
-            # Connect dengan extra_headers yang benar
-            self.websocket = await websockets.connect(
-                Config.WS_JOIN_URL,
-                extra_headers=extra_headers,
-                max_size=10_000_000,
-                ping_interval=20,
-                ping_timeout=60,
-                close_timeout=10
-            )
+            # Method 1: Coba dengan extra_headers (versi baru)
+            try:
+                # Untuk websockets >= 10.0
+                import websockets as ws
+                if hasattr(ws, '__version__'):
+                    # Versi baru support extra_headers sebagai dict
+                    self.websocket = await websockets.connect(
+                        Config.WS_JOIN_URL,
+                        extra_headers=headers,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60,
+                        close_timeout=10
+                    )
+            except TypeError:
+                # Method 2: Fallback untuk versi lama
+                # Untuk websockets < 10.0, gunakan parameter yang berbeda
+                try:
+                    self.websocket = await websockets.connect(
+                        Config.WS_JOIN_URL,
+                        headers=headers,  # Beberapa versi support headers
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+                except TypeError:
+                    # Method 3: Gunakan additional_headers (versi 9.x)
+                    try:
+                        self.websocket = await websockets.connect(
+                            Config.WS_JOIN_URL,
+                            additional_headers=headers,
+                            max_size=10_000_000,
+                            ping_interval=20,
+                            ping_timeout=60
+                        )
+                    except TypeError:
+                        # Method 4: Gunakan subprotocols dan extra_headers sebagai list of tuples
+                        extra_headers_list = [
+                            ("X-API-Key", Config.API_KEY),
+                            ("X-Version", version),
+                            ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
+                        ]
+                        self.websocket = await websockets.connect(
+                            Config.WS_JOIN_URL,
+                            extra_headers=extra_headers_list,
+                            max_size=10_000_000,
+                            ping_interval=20,
+                            ping_timeout=60
+                        )
             
             logger.info("   ✅ WebSocket connected")
             
@@ -84,7 +119,7 @@ class GameWebSocket:
             assigned = json.loads(assigned_raw)
             
             self.game_id = assigned.get("gameId")
-            self.agent_id = assigned.get("agentId")  # Self-token untuk bot
+            self.agent_id = assigned.get("agentId")
             
             logger.info(f"   ✅ Assigned to game: {self.game_id}")
             if self.agent_id:
@@ -112,22 +147,46 @@ class GameWebSocket:
             if not version:
                 version = "1.15.0"
             
-            extra_headers = [
-                ("X-API-Key", Config.API_KEY),
-                ("X-Version", version),
-                ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
-            ]
+            headers = {
+                "X-API-Key": Config.API_KEY,
+                "X-Version": version,
+                "User-Agent": f"ClawRoyaleBot/{Config.AGENT_NAME}"
+            }
             
             logger.info(f"🔌 Resuming {entry_type} game at {Config.WS_AGENT_URL}")
             
-            self.websocket = await websockets.connect(
-                Config.WS_AGENT_URL,
-                extra_headers=extra_headers,
-                max_size=10_000_000,
-                ping_interval=20,
-                ping_timeout=60,
-                close_timeout=10
-            )
+            # Coba berbagai metode
+            try:
+                self.websocket = await websockets.connect(
+                    Config.WS_AGENT_URL,
+                    extra_headers=headers,
+                    max_size=10_000_000,
+                    ping_interval=20,
+                    ping_timeout=60,
+                    close_timeout=10
+                )
+            except TypeError:
+                try:
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        headers=headers,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+                except TypeError:
+                    extra_headers_list = [
+                        ("X-API-Key", Config.API_KEY),
+                        ("X-Version", version),
+                        ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
+                    ]
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        extra_headers=extra_headers_list,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
             
             self.connected = True
             self.is_alive = True
@@ -135,9 +194,6 @@ class GameWebSocket:
             logger.info("   ✅ Resumed successfully")
             return True
             
-        except websockets.WebSocketException as e:
-            logger.error(f"❌ Resume WebSocket error: {e}")
-            return False
         except Exception as e:
             logger.error(f"❌ Resume error: {e}")
             return False
@@ -225,20 +281,44 @@ class GameWebSocket:
             if not version:
                 version = "1.15.0"
             
-            extra_headers = [
-                ("X-API-Key", Config.API_KEY),
-                ("X-Version", version),
-                ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
-            ]
+            headers = {
+                "X-API-Key": Config.API_KEY,
+                "X-Version": version,
+                "User-Agent": f"ClawRoyaleBot/{Config.AGENT_NAME}"
+            }
             
-            self.websocket = await websockets.connect(
-                Config.WS_AGENT_URL,
-                extra_headers=extra_headers,
-                max_size=10_000_000,
-                ping_interval=20,
-                ping_timeout=60,
-                close_timeout=10
-            )
+            try:
+                self.websocket = await websockets.connect(
+                    Config.WS_AGENT_URL,
+                    extra_headers=headers,
+                    max_size=10_000_000,
+                    ping_interval=20,
+                    ping_timeout=60,
+                    close_timeout=10
+                )
+            except TypeError:
+                try:
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        headers=headers,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+                except TypeError:
+                    extra_headers_list = [
+                        ("X-API-Key", Config.API_KEY),
+                        ("X-Version", version),
+                        ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
+                    ]
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        extra_headers=extra_headers_list,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+            
             self.connected = True
             self.is_alive = True
             logger.info("✅ Reconnected successfully")
