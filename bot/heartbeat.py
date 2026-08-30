@@ -189,24 +189,37 @@ class Heartbeat:
             logger.error(f"❌ Force join error: {e}")
             return False
     
-    async def _force_join_free(self):
-        logger.info("🚀 Competitive AI: Force joining game...")
-        
-        self.force_join_attempted = True
-        self.waiting_for_next_game = False
-        
-        max_force_attempts = 3
-        for attempt in range(max_force_attempts):
-            try:
-                self.websocket = GameWebSocket()
-                self.websocket.on_game_ended = self._on_game_ended
-                
-                connected = await self.websocket.connect("free")
-                
-                if not connected:
-                    logger.warning(f"⚠️ Force join attempt {attempt + 1}/{max_force_attempts} failed")
-                    await asyncio.sleep(2)
+    # Di dalam _force_join_free, tambahkan handling untuk gameId None:
+
+async def _force_join_free(self):
+    logger.info("🚀 Competitive AI: Force joining game...")
+    
+    self.force_join_attempted = True
+    self.waiting_for_next_game = False
+    
+    max_force_attempts = 3
+    for attempt in range(max_force_attempts):
+        try:
+            self.websocket = GameWebSocket()
+            self.websocket.on_game_ended = self._on_game_ended
+            
+            connected = await self.websocket.connect("free")
+            
+            if not connected:
+                # 🔥 CEK: Jika gameId None, berarti tidak ada game
+                if self.websocket.game_id is None:
+                    logger.warning("⚠️ No game available (gameId is None)")
+                    await self._cleanup()
+                    await asyncio.sleep(5)
                     continue
+                    
+                logger.warning(f"⚠️ Force join attempt {attempt + 1}/{max_force_attempts} failed")
+                await asyncio.sleep(2)
+                continue
+            
+            logger.info("✅ Joined game!")
+            self.last_game_id = self.websocket.game_id
+            # ... sisanya sama
                 
                 logger.info("✅ Joined game!")
                 self.last_game_id = self.websocket.game_id
