@@ -19,17 +19,15 @@ class ActionType(Enum):
 class ActionScore:
     """Scoring system untuk setiap aksi"""
     
-    # Base scores
     SCORE_KILL = 1000
     SCORE_SURVIVAL = 600
-    SCORE_LOOT = 50  # base, akan ditambah item_value
+    SCORE_LOOT = 50
     SCORE_POSITION = 100
-    SCORE_HEAL = 10  # per HP
+    SCORE_HEAL = 10
     SCORE_RETREAT = 200
     SCORE_EXPLORE = 150
     SCORE_EQUIP = 300
     
-    # Penalties
     PENALTY_BAD_FIGHT = -1000
     PENALTY_DEATH = -100000
     PENALTY_WASTE_TURN = -50
@@ -37,49 +35,35 @@ class ActionScore:
     @staticmethod
     def calculate_kill_score(target_hp: int, target_atk: int, 
                             my_hp: int, my_atk: int, distance: int) -> float:
-        """Score untuk aksi kill"""
         if target_hp <= 0:
-            return -1000  # Target sudah mati
+            return -1000
         
-        # Kill probability
         damage_per_turn = max(1, my_atk - target_atk // 2)
         turns_to_kill = max(1, target_hp // damage_per_turn)
-        
-        # Risk: damage yang akan diterima
         enemy_damage = max(1, target_atk - my_atk // 2)
         damage_taken = enemy_damage * turns_to_kill
-        
-        # Survival chance
         survival_chance = max(0, 1 - (damage_taken / max(1, my_hp)))
-        
-        # Distance factor
         distance_factor = max(0, 1 - (distance / 10))
         
         score = (ActionScore.SCORE_KILL * survival_chance * distance_factor) - (damage_taken * 10)
         
-        # Bonus untuk low HP target
         if target_hp < 30:
             score += 200
         
-        # Penalty jika target terlalu kuat
         if target_atk > my_atk * 1.5:
             score += ActionScore.PENALTY_BAD_FIGHT
             
         return score
     
     @staticmethod
-    def calculate_loot_score(item_value: int, distance: int, 
-                            threat_level: float) -> float:
-        """Score untuk aksi loot"""
+    def calculate_loot_score(item_value: int, distance: int, threat_level: float) -> float:
         if item_value <= 0:
             return -100
         
         distance_factor = max(0, 1 - (distance / 5))
         threat_penalty = threat_level * 200
-        
         score = (ActionScore.SCORE_LOOT + item_value) * distance_factor - threat_penalty
         
-        # Bonus untuk item langka
         if item_value > 100:
             score += 100
             
@@ -88,17 +72,13 @@ class ActionScore:
     @staticmethod
     def calculate_heal_score(hp_recovered: int, current_hp: int, 
                             max_hp: int, threat_level: float) -> float:
-        """Score untuk aksi heal"""
         if current_hp >= max_hp:
-            return -50  # Tidak perlu heal
+            return -50
         
         hp_percent = current_hp / max_hp
         urgency = 1 - hp_percent
-        
-        # Heal lebih bernilai jika HP rendah
         score = ActionScore.SCORE_HEAL * hp_recovered * urgency
         
-        # Bonus jika dalam bahaya
         if threat_level > 0.5 and hp_percent < 0.4:
             score += 300
             
@@ -109,17 +89,11 @@ class ActionScore:
                                death_zone_center: Tuple[int, int],
                                death_zone_radius: int,
                                enemy_positions: List[Tuple[int, int]]) -> float:
-        """Score untuk posisi saat ini"""
         x, y = position
         cx, cy = death_zone_center
-        
-        # Distance to death zone center
         distance_to_center = math.sqrt((x - cx)**2 + (y - cy)**2)
-        
-        # Safety score (semakin dekat ke center = lebih aman)
         safety_score = max(0, 1 - (distance_to_center / max(1, death_zone_radius)))
         
-        # Enemy density (hindari kerumunan)
         enemy_density = 0
         for ex, ey in enemy_positions:
             dist = math.sqrt((x - ex)**2 + (y - ey)**2)
@@ -127,32 +101,25 @@ class ActionScore:
                 enemy_density += 1 / max(1, dist)
         
         score = ActionScore.SCORE_POSITION * safety_score - (enemy_density * 50)
-        
         return score
     
     @staticmethod
     def calculate_retreat_score(threat_level: float, current_hp: int, 
                                max_hp: int, escape_chance: float) -> float:
-        """Score untuk aksi retreat"""
         if threat_level < 0.3:
-            return -50  # Tidak perlu retreat
+            return -50
         
         hp_percent = current_hp / max_hp
         urgency = 1 - hp_percent
-        
         score = (ActionScore.SCORE_RETREAT * urgency * threat_level * escape_chance)
         
-        # Bonus jika retreat menyelamatkan nyawa
         if hp_percent < 0.2 and threat_level > 0.8:
             score += 1000
             
         return score
 
 class AdaptiveAI:
-    """
-    Adaptive Combat AI dengan Scoring System
-    Target: loot → equip → heal → positioning → target selection → combat → retreat → death-zone routing
-    """
+    """Adaptive Combat AI dengan Scoring System"""
     
     def __init__(self, websocket: GameWebSocket):
         self.websocket = websocket
@@ -161,19 +128,15 @@ class AdaptiveAI:
         self.is_dead = False
         self.best_action = None
         self.action_history = []
-        
-        # Tracking
         self.kills = 0
         self.damage_dealt = 0
         self.items_collected = 0
         self.survival_time = 0
         
-        # Thresholds
         self.HP_CRITICAL = 0.20
         self.HP_LOW = 0.40
         self.HP_SAFE = 0.70
         
-        # Scoring weights
         self.weights = {
             "survival": 1.0,
             "aggression": 0.7,
@@ -182,10 +145,8 @@ class AdaptiveAI:
         }
         
     async def handle_message(self, data: Dict):
-        """Handle incoming messages"""
         msg_type = data.get("type")
         
-        # Death detection
         if msg_type == "agent_died":
             meta = data.get("meta", {})
             if meta.get("youDied") == True:
@@ -211,13 +172,11 @@ class AdaptiveAI:
                         self.websocket.on_game_ended()
                     return
         
-        # Update state
         if msg_type == "agent_view":
             self.state = data.get("view", {})
             self.turn += 1
             self.survival_time = self.turn
             
-            # Analyze and decide
             if data.get("canAct", True):
                 await self._analyze_and_decide()
         
@@ -228,32 +187,20 @@ class AdaptiveAI:
                 await self._analyze_and_decide()
     
     async def _analyze_and_decide(self):
-        """
-        Analisis dunia dan pilih aksi terbaik
-        """
         try:
-            # 1. World Analysis
             world = self._analyze_world()
-            
-            # 2. Threat Assessment
             threats = self._assess_threats(world)
-            
-            # 3. Score all possible actions
             actions = self._score_actions(world, threats)
             
-            # 4. Select best action
             if actions:
                 best = max(actions, key=lambda x: x['score'])
                 self.best_action = best
                 
-                # Log decision
                 if self.turn % 5 == 0:
                     logger.info(f"🎯 Turn {self.turn}: Best action = {best['action'].value} (score: {best['score']:.1f})")
                 
-                # Execute action
                 await self._execute_action(best)
             else:
-                # Fallback: random move
                 logger.warning("⚠️ No actions scored, moving randomly")
                 await self._move_random()
                 
@@ -262,7 +209,6 @@ class AdaptiveAI:
             await self._move_random()
     
     def _analyze_world(self) -> Dict:
-        """World Analyzer - menganalisis semua informasi game"""
         self_section = self.state.get("self", {})
         
         world = {
@@ -286,7 +232,6 @@ class AdaptiveAI:
             "death_zone": self.state.get("deathZone", {"center": {"x": 10, "y": 10}, "radius": 10})
         }
         
-        # Log summary every 10 turns
         if self.turn % 10 == 0:
             hp = world["self"]["hp"]
             max_hp = world["self"]["max_hp"]
@@ -297,7 +242,6 @@ class AdaptiveAI:
         return world
     
     def _assess_threats(self, world: Dict) -> Dict:
-        """Threat Engine - menilai ancaman dan peluang"""
         threats = {
             "overall_threat": 0,
             "kill_chance": 0,
@@ -308,10 +252,9 @@ class AdaptiveAI:
         
         self_section = world["self"]
         my_hp = self_section["hp"]
-        my_atk = self_section.get("atk", 5)
-        my_def = self_section.get("def", 2)
+        my_atk = 5
+        my_def = 2
         
-        # Assess enemies
         all_enemies = world["enemies"]["agents"] + world["enemies"]["monsters"]
         
         for enemy in all_enemies:
@@ -320,15 +263,10 @@ class AdaptiveAI:
             enemy_def = enemy.get("def", 2)
             distance = enemy.get("distance", 10)
             
-            # Kill probability
             damage_per_turn = max(1, my_atk - enemy_def // 2)
             turns_to_kill = max(1, enemy_hp // damage_per_turn)
-            
-            # Damage received
             enemy_damage = max(1, enemy_atk - my_def // 2)
             damage_received = enemy_damage * turns_to_kill
-            
-            # Threat level
             threat_level = (enemy_atk / max(1, my_atk)) * (1 / max(1, distance))
             
             threats["targets"].append({
@@ -346,16 +284,13 @@ class AdaptiveAI:
             threats["damage_received"] += damage_received / max(1, len(all_enemies))
             threats["overall_threat"] += threat_level
         
-        # Calculate survival factors
         hp_percent = my_hp / world["self"]["max_hp"]
         threats["escape_chance"] = max(0, 1 - threats["overall_threat"] / 10)
         
-        # Death zone threat
         pos = self_section["position"]
         dz = world["death_zone"]
         cx, cy = dz["center"]["x"], dz["center"]["y"]
         radius = dz["radius"]
-        
         dx = pos["x"] - cx
         dy = pos["y"] - cy
         distance_to_center = math.sqrt(dx*dx + dy*dy)
@@ -363,35 +298,26 @@ class AdaptiveAI:
         if distance_to_center > radius * 0.8:
             threats["overall_threat"] += 2
         
-        # Kill chance (best target)
         if threats["targets"]:
             threats["kill_chance"] = max(t["kill_probability"] for t in threats["targets"])
         
         return threats
     
     def _score_actions(self, world: Dict, threats: Dict) -> List[Dict]:
-        """
-        Decision Engine - scoring semua kemungkinan aksi
-        """
         actions = []
         self_section = world["self"]
         
-        # ──────────────────────────────────────────────
-        # 1. SCORE: KILL (Attack enemies)
-        # ──────────────────────────────────────────────
+        # 1. KILL
         for target in threats["targets"]:
-            if target["distance"] <= 3:  # Within attack range
+            if target["distance"] <= 3:
                 score = ActionScore.calculate_kill_score(
                     target_hp=target["hp"],
                     target_atk=target["atk"],
                     my_hp=self_section["hp"],
-                    my_atk=5,  # Base ATK
+                    my_atk=5,
                     distance=target["distance"]
                 )
-                
-                # Adjust with aggression weight
                 score *= self.weights["aggression"]
-                
                 actions.append({
                     "action": ActionType.KILL,
                     "target_id": target["id"],
@@ -399,22 +325,16 @@ class AdaptiveAI:
                     "details": f"Kill {target['id'][:8]} (HP: {target['hp']})"
                 })
         
-        # ──────────────────────────────────────────────
-        # 2. SCORE: LOOT (Collect items)
-        # ──────────────────────────────────────────────
+        # 2. LOOT
         for item in world["items"]:
             distance = item.get("distance", 10)
             item_value = item.get("value", 10)
-            
             score = ActionScore.calculate_loot_score(
                 item_value=item_value,
                 distance=distance,
                 threat_level=threats["overall_threat"]
             )
-            
-            # Adjust with greed weight
             score *= self.weights["greed"]
-            
             actions.append({
                 "action": ActionType.LOOT,
                 "target_id": item.get("id"),
@@ -422,12 +342,9 @@ class AdaptiveAI:
                 "details": f"Loot {item.get('name', 'item')} (value: {item_value})"
             })
         
-        # ──────────────────────────────────────────────
-        # 3. SCORE: HEAL
-        # ──────────────────────────────────────────────
+        # 3. HEAL
         hp_percent = self_section["hp"] / self_section["max_hp"]
         if hp_percent < 0.8:
-            # Check inventory for healing items
             for item in self_section["items"]:
                 item_type = item.get("type", "")
                 if "heal" in item_type.lower() or "potion" in item_type.lower():
@@ -438,7 +355,6 @@ class AdaptiveAI:
                         max_hp=self_section["max_hp"],
                         threat_level=threats["overall_threat"]
                     )
-                    
                     actions.append({
                         "action": ActionType.HEAL,
                         "target_id": item.get("id"),
@@ -446,9 +362,7 @@ class AdaptiveAI:
                         "details": f"Heal +{hp_recovered} HP"
                     })
         
-        # ──────────────────────────────────────────────
-        # 4. SCORE: RETREAT
-        # ──────────────────────────────────────────────
+        # 4. RETREAT
         if hp_percent < self.HP_LOW or threats["overall_threat"] > 5:
             score = ActionScore.calculate_retreat_score(
                 threat_level=threats["overall_threat"],
@@ -457,12 +371,9 @@ class AdaptiveAI:
                 escape_chance=threats["escape_chance"]
             )
             
-            # Find safe direction
             pos = self_section["position"]
             dz = world["death_zone"]
             cx, cy = dz["center"]["x"], dz["center"]["y"]
-            
-            # Move towards center
             dx = cx - pos["x"]
             dy = cy - pos["y"]
             
@@ -478,17 +389,13 @@ class AdaptiveAI:
                 "details": f"Retreat {direction} (threat: {threats['overall_threat']:.1f})"
             })
         
-        # ──────────────────────────────────────────────
-        # 5. SCORE: EXPLORE (Ruins)
-        # ──────────────────────────────────────────────
+        # 5. EXPLORE
         for ruin in world["ruins"]:
             distance = ruin.get("distance", 10)
             explored = ruin.get("explored", 0)
-            
             if distance <= 2 and explored < 3:
                 score = ActionScore.SCORE_EXPLORE * (3 - explored) / 3
                 score -= threats["overall_threat"] * 20
-                
                 actions.append({
                     "action": ActionType.EXPLORE,
                     "target_id": ruin.get("id"),
@@ -496,9 +403,7 @@ class AdaptiveAI:
                     "details": f"Explore ruin ({explored}/3)"
                 })
         
-        # ──────────────────────────────────────────────
-        # 6. SCORE: POSITION (Move to safe zone)
-        # ──────────────────────────────────────────────
+        # 6. POSITION (MOVE)
         pos = self_section["position"]
         dz = world["death_zone"]
         cx, cy = dz["center"]["x"], dz["center"]["y"]
@@ -515,23 +420,10 @@ class AdaptiveAI:
             death_zone_radius=radius,
             enemy_positions=enemy_positions
         )
-
-
-        # Di method _execute_action, tambahkan tracking kill:
-elif action_type == ActionType.KILL:
-    await self.websocket.send_action({
-        "type": "attack",
-        "targetId": action["target_id"]
-    })
-    self.kills += 1  # Track kill
-    logger.info(f"⚔️ Attacking target (kill #{self.kills})")
-
-        # Move towards better position
+        
         if position_score < 50:
-            # Find best direction
             dx = cx - pos["x"]
             dy = cy - pos["y"]
-            
             if abs(dx) > abs(dy):
                 direction = "right" if dx > 0 else "left"
             else:
@@ -545,26 +437,21 @@ elif action_type == ActionType.KILL:
                 "details": f"Move {direction} (position: {position_score:.1f})"
             })
         
-        # ──────────────────────────────────────────────
-        # 7. FALLBACK: Random move (lowest priority)
-        # ──────────────────────────────────────────────
+        # 7. FALLBACK: Random move
         if not actions:
             directions = ["up", "down", "left", "right"]
             for direction in directions:
                 actions.append({
                     "action": ActionType.MOVE,
                     "direction": direction,
-                    "score": -10,  # Low score
+                    "score": -10,
                     "details": f"Random move {direction}"
                 })
         
-        # Sort by score descending
         actions.sort(key=lambda x: x["score"], reverse=True)
-        
         return actions
     
     async def _execute_action(self, action: Dict):
-        """Execute the selected action"""
         action_type = action["action"]
         
         if action_type == ActionType.KILL:
@@ -572,49 +459,50 @@ elif action_type == ActionType.KILL:
                 "type": "attack",
                 "targetId": action["target_id"]
             })
-            logger.debug(f"⚔️ Executing: {action['details']}")
+            self.kills += 1
+            logger.info(f"⚔️ Attacking target (kill #{self.kills})")
             
         elif action_type == ActionType.LOOT:
             await self.websocket.send_action({
                 "type": "collect",
                 "itemId": action["target_id"]
             })
-            logger.debug(f"📦 Executing: {action['details']}")
+            self.items_collected += 1
+            logger.info(f"📦 Collecting item #{self.items_collected}")
             
         elif action_type == ActionType.HEAL:
             await self.websocket.send_action({
                 "type": "use_item",
                 "itemId": action["target_id"]
             })
-            logger.debug(f"💊 Executing: {action['details']}")
+            logger.info(f"💊 Healing")
             
         elif action_type == ActionType.INTERACT:
             await self.websocket.send_action({
                 "type": "interact",
                 "interactableId": action["target_id"]
             })
-            logger.debug(f"🤝 Executing: {action['details']}")
+            logger.info(f"🤝 Interacting")
             
         elif action_type == ActionType.EXPLORE:
             await self.websocket.send_action({
                 "type": "explore",
                 "ruinId": action["target_id"]
             })
-            logger.debug(f"🏛️ Executing: {action['details']}")
+            logger.info(f"🏛️ Exploring ruin")
             
-        elif action_type in [ActionType.MOVE, ActionType.RETREAT]:
+        elif action_type == ActionType.RETREAT or action_type == ActionType.MOVE:
             direction = action.get("direction", "up")
             await self.websocket.send_action({
                 "type": "move",
                 "direction": direction
             })
-            logger.debug(f"🚶 Executing: {action['details']}")
+            logger.debug(f"🚶 {action['details']}")
             
         else:
             logger.warning(f"⚠️ Unknown action: {action_type}")
     
     async def _move_random(self):
-        """Fallback random move"""
         directions = ["up", "down", "left", "right"]
         direction = random.choice(directions)
         await self.websocket.send_action({
