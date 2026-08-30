@@ -31,6 +31,7 @@ class Heartbeat:
         self.idle_refresh_count = 0
         self.max_idle_refresh = 3
         self.force_join_attempted = False
+        self.waiting_for_next_game = False
         
     async def run(self):
         logger.info(f"Starting Claw Royale Bot: {Config.AGENT_NAME}")
@@ -78,47 +79,36 @@ class Heartbeat:
                     await asyncio.sleep(5)
                     continue
                 
-                # 🔥 FORCE JOIN - jika freeReady None
-                if not self.force_join_attempted and self.client.account_data:
-                    free_ready = self.client.account_data.get("readiness", {}).get("freeReady")
+                # 🔥 FORCE JOIN - jika freeReady None atau game ended
+                if not self.force_join_attempted or self.game_ended:
+                    if self.game_ended:
+                        logger.info("🔄 Game ended - immediately joining new game...")
+                        self.game_ended = False
+                        self.join_attempts = 0
+                        self.idle_refresh_count = 0
+                        
+                        # 🔥 LANGSUNG FORCE JOIN, tanpa menunggu readiness
+                        await self._force_join_free()
+                        self.force_join_attempted = True
+                        continue
+                    
+                    free_ready = self.client.account_data.get("readiness", {}).get("freeReady") if self.client.account_data else None
                     if free_ready is None or free_ready == False:
                         logger.info("🔧 freeReady not available - starting auto-pilot...")
                         await self._force_join_free()
                         self.force_join_attempted = True
                         continue
                 
-                # 🔥 GAME ENDED - cari game baru
-                if self.game_ended:
-                    logger.info("🔄 Game ended - searching for next game...")
-                    self.game_ended = False
-                    self.join_attempts = 0
-                    self.idle_refresh_count = 0
-                    
-                    await asyncio.sleep(2)
+                # 🔥 IDLE CHECK - jika terlalu lama idle, force join
+                if self.idle_refresh_count >= self.max_idle_refresh:
+                    logger.info("🔧 Idle too long - forcing auto-pilot...")
                     await self._force_refresh_state()
-                    
-                    joined = await self._find_and_join_game()
-                    
-                    if not joined:
-                        logger.info("😴 No game available yet, will retry...")
-                        self.game_ended = True
-                        self.join_attempts += 1
-                        
-                        if self.join_attempts < self.max_join_attempts:
-                            logger.info(f"   Retry {self.join_attempts}/{self.max_join_attempts}")
-                            await asyncio.sleep(5)
-                        else:
-                            logger.info("🔧 Force joining after retries...")
-                            await self._force_join_free()
-                            self.join_attempts = 0
+                    await self._force_join_free()
+                    self.idle_refresh_count = 0
+                    self.force_join_attempted = True
                     continue
                 
                 # 🔥 STATE CHECK - normal flow
-                if self.idle_refresh_count >= self.max_idle_refresh:
-                    logger.info("🔄 Refreshing state (idle too long)...")
-                    await self._force_refresh_state()
-                    self.idle_refresh_count = 0
-                
                 state = await self.router.check_state()
                 
                 if state == AgentState.IN_GAME_FREE:
@@ -134,26 +124,26 @@ class Heartbeat:
                     logger.info("🎮 Starting new paid game...")
                     await self._handle_start_game("paid")
                 elif state == AgentState.IDLE:
-                    logger.info("😴 Idle - waiting for games")
+                    logger.info("😴 Idle - forcing auto-pilot...")
                     self.idle_refresh_count += 1
                     
-                    if self.last_game_id and not self.game_ended:
-                        logger.info(f"🔄 Attempting to rejoin game {self.last_game_id}...")
-                        await self._handle_reconnect()
-                    
-                    if self.idle_refresh_count >= self.max_idle_refresh:
-                        logger.info("🔧 Idle too long - forcing auto-pilot...")
-                        await self._force_refresh_state()
+                    # 🔥 LANGSUNG FORCE JOIN, jangan menunggu
+                    if self.reconnect_attempts > 2:
+                        logger.info("🔧 Too many idle attempts - force joining...")
+                        await self._force_join_free()
+                        self.reconnect_attempts = 0
+                        self.idle_refresh_count = 0
+                    else:
+                        # Tunggu sebentar lalu force join
+                        await asyncio.sleep(3)
                         await self._force_join_free()
                         self.idle_refresh_count = 0
-                        self.reconnect_attempts = 0
                     
-                    await asyncio.sleep(10)
                 elif state == AgentState.ERROR:
                     logger.error("⚠️ Bot in error state")
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(5)
                     
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 
             except Exception as e:
                 logger.error(f"Main loop error: {e}", exc_info=True)
@@ -184,38 +174,6 @@ class Heartbeat:
                     logger.debug("   ℹ️ No active games found")
         except Exception as e:
             logger.error(f"❌ Force refresh error: {e}")
-    
-    async def _find_and_join_game(self) -> bool:
-        logger.info("🔍 Searching for available game...")
-        
-        try:
-            await self._force_refresh_state()
-            
-            state = await self.router.check_state()
-            
-            if state == AgentState.READY_FREE:
-                logger.info("✅ Found free game!")
-                await self._handle_start_game("free")
-                return True
-            elif state == AgentState.READY_PAID:
-                logger.info("✅ Found paid game!")
-                await self._handle_start_game("paid")
-                return True
-            elif state == AgentState.IN_GAME_FREE:
-                logger.info("✅ Found existing free game!")
-                await self._handle_game("free")
-                return True
-            elif state == AgentState.IN_GAME_PAID:
-                logger.info("✅ Found existing paid game!")
-                await self._handle_game("paid")
-                return True
-            else:
-                logger.info("   No game available yet")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Error finding game: {e}")
-            return False
     
     async def _login(self):
         if self.login_attempted:
@@ -292,10 +250,11 @@ class Heartbeat:
             logger.error(f"❌ Auto-setup error: {e}")
     
     async def _force_join_free(self):
-        """🔥 AUTO-PILOT: Force join dan mulai bermain"""
-        logger.info("🔧 Auto-pilot: Force joining free room...")
+        """🔥 AUTO-PILOT: Force join dan langsung mulai bermain"""
+        logger.info("🚀 Auto-pilot: Force joining game...")
         
         self.force_join_attempted = True
+        self.waiting_for_next_game = False
         
         max_force_attempts = 3
         for attempt in range(max_force_attempts):
@@ -306,101 +265,46 @@ class Heartbeat:
                 
                 if not connected:
                     logger.warning(f"⚠️ Force join attempt {attempt + 1}/{max_force_attempts} failed")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
                     continue
                 
-                logger.info("✅ Force joined free room!")
+                logger.info("✅ Joined game!")
                 self.last_game_id = self.websocket.game_id
                 self.game_ended = False
                 self.join_attempts = 0
                 self.idle_refresh_count = 0
+                self.reconnect_attempts = 0
                 
-                # 2. 🔥 START AUTO-PILOT - Inisialisasi AdaptiveAI
+                # 2. 🔥 START AUTO-PILOT
                 logger.info("🤖 Auto-pilot: Starting Adaptive AI...")
                 self.strategy = AdaptiveAI(self.websocket)
-                
-                # 3. 🔥 Set callback untuk game ended
                 self.websocket.on_game_ended = self._on_game_ended
                 
-                # 4. 🔥 Mulai receive loop (ini akan menjalankan auto-pilot)
+                # 3. 🔥 Mulai gameplay
                 await self.websocket.receive_loop(self.strategy.handle_message)
                 
-                # 5. Cleanup setelah game ended
+                # 4. Cleanup setelah game ended
                 await self._cleanup()
                 self.game_ended = True
-                logger.info("✅ Auto-pilot game ended - will search for next")
+                logger.info("✅ Game ended - will join next game")
                 return
                 
             except Exception as e:
                 logger.error(f"❌ Force join error (attempt {attempt + 1}): {e}")
                 await self._cleanup()
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 await self._force_refresh_state()
         
         logger.error("❌ All force join attempts failed")
         self.game_ended = False
         self.join_attempts = 0
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
     
     def _on_game_ended(self):
-        """Callback ketika game ended (dipanggil dari WebSocket)"""
-        logger.info("🏁 Game ended callback triggered")
+        """Callback ketika game ended"""
+        logger.info("🏁 Game ended - triggering auto-pilot")
         self.game_ended = True
         self.force_join_attempted = False
-    
-    async def _handle_reconnect(self):
-        if self.reconnect_attempts > self.max_reconnect_attempts:
-            logger.warning(f"⚠️ Max reconnect attempts reached")
-            self.reconnect_attempts = 0
-            self.last_game_id = None
-            return
-        
-        wait_time = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
-        logger.info(f"🔄 Reconnect attempt {self.reconnect_attempts + 1}/{self.max_reconnect_attempts}")
-        logger.info(f"   Backoff: waiting {wait_time}s")
-        
-        await asyncio.sleep(wait_time)
-        self.reconnect_attempts += 1
-        
-        try:
-            await self._force_refresh_state()
-            
-            account = await self.client.get_account()
-            if not account or not account.get("data"):
-                return
-            
-            games = account.get("data", {}).get("currentGames", [])
-            for game in games:
-                if game.get("gameId") == self.last_game_id and game.get("isAlive"):
-                    logger.info(f"   ✅ Game {self.last_game_id} still active!")
-                    entry_type = game.get("entryType", "free")
-                    
-                    self.websocket = GameWebSocket()
-                    connected = await self.websocket.resume_game(entry_type)
-                    
-                    if connected:
-                        logger.info(f"   ✅ Reconnected to game {self.last_game_id}")
-                        self.reconnect_attempts = 0
-                        self.game_ended = False
-                        self.join_attempts = 0
-                        self.idle_refresh_count = 0
-                        
-                        # 🔥 Start auto-pilot
-                        self.strategy = AdaptiveAI(self.websocket)
-                        self.websocket.on_game_ended = self._on_game_ended
-                        await self.websocket.receive_loop(self.strategy.handle_message)
-                        
-                        await self._cleanup()
-                        self.game_ended = True
-                        return
-                    break
-            
-            logger.info(f"   ℹ️ Game {self.last_game_id} ended")
-            self.last_game_id = None
-            self.reconnect_attempts = 0
-            
-        except Exception as e:
-            logger.error(f"❌ Reconnect error: {e}")
     
     async def _handle_game(self, entry_type: str):
         logger.info(f"📌 Resuming {entry_type} game...")
@@ -430,7 +334,6 @@ class Heartbeat:
         finally:
             await self._cleanup()
             self.game_ended = True
-            logger.info(f"✅ {entry_type} game ended - will search for next game")
     
     async def _handle_start_game(self, entry_type: str):
         logger.info(f"🎯 Starting new {entry_type} game...")
@@ -462,7 +365,6 @@ class Heartbeat:
         finally:
             await self._cleanup()
             self.game_ended = True
-            logger.info(f"✅ Game ended - will search for next game")
     
     async def _try_join(self, entry_type: str) -> bool:
         logger.info(f"📦 Checking loadout...")
