@@ -1,3 +1,3 @@
 # Strategy Package
-from .gameplay import GameStrategy
+from .adaptive_ai import AdaptiveAI, ActionType, ActionScore
 from .loadout import LoadoutManager
