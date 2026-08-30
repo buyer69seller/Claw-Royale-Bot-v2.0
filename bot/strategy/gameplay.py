@@ -8,7 +8,6 @@ class GameStrategy:
         self.websocket = websocket
         self.state = {}
         self.targets = []
-        self.turn = 0
         
     async def handle_message(self, data: Dict):
         msg_type = data.get("type")
@@ -19,7 +18,6 @@ class GameStrategy:
             await self._decide_action()
             
         elif msg_type == "turn_advanced":
-            self.turn += 1
             await self._decide_action()
             
         elif msg_type == "action_result":
@@ -27,32 +25,17 @@ class GameStrategy:
             if not result.get("success"):
                 error = result.get("error", {})
                 if error.get("code") == "TARGET_DEAD":
-                    logger.debug("Target dead, retrying...")
                     self.targets = []
                     await self._decide_action()
     
     async def _decide_action(self):
         try:
-            # 1. Survival - if low HP, heal or run
-            if self._in_danger():
-                await self._move_random()
-                return
-            
-            # 2. Fight - if target nearby
             if self.targets and self._should_fight():
                 await self._handle_fight()
-                return
-            
-            # 3. Explore - move random
-            await self._move_random()
-            
+            else:
+                await self._move_random()
         except Exception as e:
             logger.error(f"Action error: {e}")
-    
-    def _in_danger(self) -> bool:
-        hp = self.state.get("self", {}).get("hp", 100)
-        max_hp = self.state.get("self", {}).get("maxHp", 100)
-        return hp < max_hp * 0.3
     
     def _should_fight(self) -> bool:
         hp = self.state.get("self", {}).get("hp", 100)
