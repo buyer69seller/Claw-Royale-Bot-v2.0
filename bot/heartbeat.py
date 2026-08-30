@@ -348,3 +348,32 @@ class Heartbeat:
             await self.websocket.close()
             self.websocket = None
         self.strategy = None
+
+async def _force_join_free(self):
+    """Force join free room tanpa menunggu readiness"""
+    logger.info("🔧 Force joining free room...")
+    
+    try:
+        # Buat WebSocket baru
+        self.websocket = GameWebSocket()
+        connected = await self.websocket.connect("free")
+        
+        if connected:
+            logger.info("✅ Force joined free room!")
+            self.last_game_id = self.websocket.game_id
+            
+            # Start strategy
+            self.strategy = GameStrategy(self.websocket)
+            await self.websocket.receive_loop(self.strategy.handle_message)
+            
+            await self._cleanup()
+        else:
+            logger.error("❌ Force join failed - will retry later")
+            # Tunggu sebentar sebelum retry
+            await asyncio.sleep(10)
+            
+    except Exception as e:
+        logger.error(f"❌ Force join error: {e}")
+        # Cleanup
+        await self._cleanup()
+        await asyncio.sleep(5)
