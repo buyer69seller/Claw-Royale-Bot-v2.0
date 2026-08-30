@@ -11,13 +11,14 @@ class GameWebSocket:
         self.client = APIClient()
         self.websocket = None
         self.game_id = None
+        self.agent_id = None
         self.is_alive = True
         self.connected = False
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
         self.base_backoff = 1
         self.max_backoff = 30
-        self.on_game_ended = None  # Callback untuk notifikasi game ended
+        self.on_game_ended = None
         
     async def connect(self, entry_type: str = "free") -> bool:
         """Connect ke Claw Royale via /ws/join"""
@@ -118,6 +119,63 @@ class GameWebSocket:
             logger.error(f"❌ Connection error: {e}")
             return False
     
+    async def resume_game(self, entry_type: str) -> bool:
+        """Resume game yang sudah ada via /ws/agent"""
+        try:
+            version = await self.client.get_version()
+            if not version:
+                version = "1.15.0"
+            
+            headers = {
+                "X-API-Key": Config.API_KEY,
+                "X-Version": version,
+                "User-Agent": f"ClawRoyaleBot/{Config.AGENT_NAME}"
+            }
+            
+            logger.info(f"🔌 Resuming {entry_type} game at {Config.WS_AGENT_URL}")
+            
+            try:
+                self.websocket = await websockets.connect(
+                    Config.WS_AGENT_URL,
+                    extra_headers=headers,
+                    max_size=10_000_000,
+                    ping_interval=20,
+                    ping_timeout=60,
+                    close_timeout=10
+                )
+            except TypeError:
+                try:
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        headers=headers,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+                except TypeError:
+                    extra_headers_list = [
+                        ("X-API-Key", Config.API_KEY),
+                        ("X-Version", version),
+                        ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
+                    ]
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        extra_headers=extra_headers_list,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+            
+            self.connected = True
+            self.is_alive = True
+            self.reconnect_attempts = 0
+            logger.info("   ✅ Resumed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Resume error: {e}")
+            return False
+    
     async def receive_loop(self, message_handler: Callable):
         """Main receive loop dengan exponential backoff"""
         logger.info("🔄 Receive loop started")
@@ -145,7 +203,6 @@ class GameWebSocket:
                             self.is_alive = False
                             self.connected = False
                             await message_handler(msg)
-                            # Notify that game ended
                             if self.on_game_ended:
                                 self.on_game_ended()
                             break
@@ -156,7 +213,6 @@ class GameWebSocket:
                         self.is_alive = False
                         self.connected = False
                         await message_handler(msg)
-                        # Notify that game ended
                         if self.on_game_ended:
                             self.on_game_ended()
                         break
@@ -171,7 +227,6 @@ class GameWebSocket:
                         logger.debug("💓 Ping sent")
                     except Exception as e:
                         logger.warning(f"⚠️ Ping failed: {e}")
-                        # Exponential backoff untuk reconnect
                         if self.reconnect_attempts < self.max_reconnect_attempts:
                             wait = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
                             self.reconnect_attempts += 1
@@ -182,7 +237,6 @@ class GameWebSocket:
                                 self.reconnect_attempts = 0
                         else:
                             logger.error("❌ Max reconnect attempts reached")
-                            # Notify that game ended (connection lost)
                             if self.on_game_ended:
                                 self.on_game_ended()
                             break
@@ -203,3 +257,91 @@ class GameWebSocket:
             self.is_alive = False
             self.connected = False
             logger.info("🔄 Receive loop ended")
+    
+    async def _reconnect(self):
+        """Reconnect dengan exponential backoff"""
+        try:
+            if self.websocket:
+                await self.websocket.close()
+                self.websocket = None
+            
+            await asyncio.sleep(2)
+            
+            version = await self.client.get_version()
+            if not version:
+                version = "1.15.0"
+            
+            headers = {
+                "X-API-Key": Config.API_KEY,
+                "X-Version": version,
+                "User-Agent": f"ClawRoyaleBot/{Config.AGENT_NAME}"
+            }
+            
+            try:
+                self.websocket = await websockets.connect(
+                    Config.WS_AGENT_URL,
+                    extra_headers=headers,
+                    max_size=10_000_000,
+                    ping_interval=20,
+                    ping_timeout=60,
+                    close_timeout=10
+                )
+            except TypeError:
+                try:
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        headers=headers,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+                except TypeError:
+                    extra_headers_list = [
+                        ("X-API-Key", Config.API_KEY),
+                        ("X-Version", version),
+                        ("User-Agent", f"ClawRoyaleBot/{Config.AGENT_NAME}")
+                    ]
+                    self.websocket = await websockets.connect(
+                        Config.WS_AGENT_URL,
+                        extra_headers=extra_headers_list,
+                        max_size=10_000_000,
+                        ping_interval=20,
+                        ping_timeout=60
+                    )
+            
+            self.connected = True
+            self.is_alive = True
+            logger.info("✅ Reconnected successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Reconnect failed: {e}")
+    
+    async def send_action(self, action: Dict) -> bool:
+        """Send action ke game"""
+        try:
+            if not self.websocket or not self.is_alive or not self.connected:
+                logger.warning("⚠️ Cannot send action: not connected or dead")
+                return False
+            
+            action_type = action.get("type")
+            logger.debug(f"📤 Action: {action_type}")
+            
+            await self.websocket.send(json.dumps(action))
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Send action error: {e}")
+            return False
+    
+    async def close(self):
+        """Close WebSocket connection"""
+        self.connected = False
+        self.is_alive = False
+        
+        if self.websocket:
+            try:
+                await self.websocket.close()
+                logger.info("🔌 WebSocket closed")
+            except Exception as e:
+                logger.warning(f"Error closing WebSocket: {e}")
+            self.websocket = None
