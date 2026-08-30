@@ -6,7 +6,273 @@ from .game.websocket import GameWebSocket
 from .strategy.loadout import LoadoutManager
 from .strategy.competitive_ai import CompetitiveAI  # ← Ganti dari AdaptiveAI
 from .utils.logger import logger
+from .config import Configimport asyncio
+import time
+from .state.router import StateRouter, AgentState
+from .api.client import APIClient
+from .game.websocket import GameWebSocket
+from .strategy.loadout import LoadoutManager
+from .strategy.competitive_ai import CompetitiveAI
+from .utils.logger import logger
 from .config import Config
+
+class Heartbeat:
+    def __init__(self):
+        self.router = StateRouter()
+        self.client = APIClient()
+        self.loadout_manager = LoadoutManager()
+        self.websocket = None
+        self.strategy = None
+        self.running = True
+        self.login_attempted = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.base_backoff = 1
+        self.max_backoff = 30
+        self.last_game_id = None
+        self.supervisor_retry_count = 0
+        self.max_supervisor_retries = 10
+        self.setup_attempted = False
+        self.game_ended = False
+        self.join_attempts = 0
+        self.max_join_attempts = 5
+        self.idle_refresh_count = 0
+        self.max_idle_refresh = 3
+        self.force_join_attempted = False
+        self.waiting_for_next_game = False
+        self.consecutive_join_failures = 0
+        self.max_join_failures = 3
+        
+    async def run(self):
+        logger.info(f"Starting Claw Royale Bot: {Config.AGENT_NAME}")
+        logger.info("=" * 50)
+        logger.info("🦞 CLAW ROYALE BOT - COMPETITIVE AI ENABLED")
+        logger.info("=" * 50)
+        
+        if self.client._has_api_key():
+            await self._login()
+        else:
+            logger.error("❌ API_KEY is not configured!")
+            return
+        
+        if not self.setup_attempted:
+            await self._auto_setup()
+        
+        while self.running:
+            try:
+                await self._main_loop()
+            except Exception as e:
+                self.supervisor_retry_count += 1
+                logger.error(f"❌ Supervisor caught error: {e}")
+                logger.info(f"   Retry #{self.supervisor_retry_count}/{self.max_supervisor_retries}")
+                
+                if self.supervisor_retry_count >= self.max_supervisor_retries:
+                    logger.error("❌ Max supervisor retries reached. Stopping...")
+                    break
+                
+                wait_time = min(self.base_backoff * (2 ** self.supervisor_retry_count), self.max_backoff)
+                logger.info(f"   Waiting {wait_time}s before restart...")
+                await asyncio.sleep(wait_time)
+                
+                if self.websocket:
+                    await self.websocket.close()
+                    self.websocket = None
+                self.strategy = None
+                self.supervisor_retry_count = 0
+    
+    async def _main_loop(self):
+        while self.running:
+            try:
+                if not self.client.is_logged_in:
+                    logger.warning("Not logged in, attempting login...")
+                    await self._login()
+                    await asyncio.sleep(5)
+                    continue
+                
+                # 🔥 CEK: Jika terlalu banyak join failure, reset dan coba lagi
+                if self.consecutive_join_failures >= self.max_join_failures:
+                    logger.warning(f"⚠️ {self.consecutive_join_failures} consecutive join failures! Resetting...")
+                    self.consecutive_join_failures = 0
+                    self.force_join_attempted = False
+                    await asyncio.sleep(10)
+                    continue
+                
+                # 🔥 FORCE JOIN
+                if not self.force_join_attempted or self.game_ended:
+                    if self.game_ended:
+                        logger.info("🔄 Game ended - immediately joining new game...")
+                        self.game_ended = False
+                        self.join_attempts = 0
+                        self.idle_refresh_count = 0
+                        
+                        # 🔥 Coba join dengan timeout
+                        join_success = await self._force_join_free_with_timeout()
+                        if not join_success:
+                            self.consecutive_join_failures += 1
+                            logger.warning(f"⚠️ Join failed ({self.consecutive_join_failures}/{self.max_join_failures})")
+                            await asyncio.sleep(5)
+                        else:
+                            self.consecutive_join_failures = 0
+                        continue
+                    
+                    free_ready = self.client.account_data.get("readiness", {}).get("freeReady") if self.client.account_data else None
+                    if free_ready is None or free_ready == False:
+                        logger.info("🔧 freeReady not available - starting competitive AI...")
+                        join_success = await self._force_join_free_with_timeout()
+                        if not join_success:
+                            self.consecutive_join_failures += 1
+                            await asyncio.sleep(5)
+                        else:
+                            self.consecutive_join_failures = 0
+                        self.force_join_attempted = True
+                        continue
+                
+                # 🔥 IDLE CHECK
+                if self.idle_refresh_count >= self.max_idle_refresh:
+                    logger.info("🔧 Idle too long - forcing competitive AI...")
+                    await self._force_refresh_state()
+                    join_success = await self._force_join_free_with_timeout()
+                    if join_success:
+                        self.idle_refresh_count = 0
+                        self.force_join_attempted = True
+                        self.consecutive_join_failures = 0
+                    continue
+                
+                # 🔥 STATE CHECK
+                state = await self.router.check_state()
+                
+                if state == AgentState.IN_GAME_FREE:
+                    logger.info("🎮 Resuming free game")
+                    await self._handle_game("free")
+                elif state == AgentState.IN_GAME_PAID:
+                    logger.info("🎮 Resuming paid game")
+                    await self._handle_game("paid")
+                elif state == AgentState.READY_FREE:
+                    logger.info("🎮 Starting new free game...")
+                    await self._handle_start_game("free")
+                elif state == AgentState.READY_PAID:
+                    logger.info("🎮 Starting new paid game...")
+                    await self._handle_start_game("paid")
+                elif state == AgentState.IDLE:
+                    logger.info("😴 Idle - forcing competitive AI...")
+                    self.idle_refresh_count += 1
+                    
+                    if self.reconnect_attempts > 2:
+                        logger.info("🔧 Too many idle attempts - force joining...")
+                        join_success = await self._force_join_free_with_timeout()
+                        if join_success:
+                            self.reconnect_attempts = 0
+                            self.idle_refresh_count = 0
+                            self.consecutive_join_failures = 0
+                        else:
+                            self.consecutive_join_failures += 1
+                    else:
+                        join_success = await self._force_join_free_with_timeout()
+                        if join_success:
+                            self.idle_refresh_count = 0
+                            self.consecutive_join_failures = 0
+                    
+                elif state == AgentState.ERROR:
+                    logger.error("⚠️ Bot in error state")
+                    await asyncio.sleep(5)
+                    
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"Main loop error: {e}", exc_info=True)
+                wait_time = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
+                logger.info(f"   Backoff: waiting {wait_time}s")
+                await asyncio.sleep(wait_time)
+                self.reconnect_attempts = min(self.reconnect_attempts + 1, 5)
+    
+    async def _force_join_free_with_timeout(self) -> bool:
+        """Force join dengan timeout"""
+        try:
+            # 🔥 Jalankan force join dengan timeout 30 detik
+            join_task = asyncio.create_task(self._force_join_free())
+            try:
+                await asyncio.wait_for(join_task, timeout=30.0)
+                return True
+            except asyncio.TimeoutError:
+                logger.error("❌ Force join timeout! Cancelling...")
+                join_task.cancel()
+                if self.websocket:
+                    await self.websocket.close()
+                    self.websocket = None
+                return False
+        except Exception as e:
+            logger.error(f"❌ Force join error: {e}")
+            return False
+    
+    async def _force_join_free(self):
+        """Force join dengan auto-rejoin jika dead"""
+        logger.info("🚀 Competitive AI: Force joining game...")
+        
+        self.force_join_attempted = True
+        self.waiting_for_next_game = False
+        
+        max_force_attempts = 3
+        for attempt in range(max_force_attempts):
+            try:
+                self.websocket = GameWebSocket()
+                
+                # 🔥 Set callback untuk game ended
+                self.websocket.on_game_ended = self._on_game_ended
+                
+                connected = await self.websocket.connect("free")
+                
+                if not connected:
+                    logger.warning(f"⚠️ Force join attempt {attempt + 1}/{max_force_attempts} failed")
+                    await asyncio.sleep(2)
+                    continue
+                
+                logger.info("✅ Joined game!")
+                self.last_game_id = self.websocket.game_id
+                self.game_ended = False
+                self.join_attempts = 0
+                self.idle_refresh_count = 0
+                self.reconnect_attempts = 0
+                self.consecutive_join_failures = 0
+                
+                # 🔥 START COMPETITIVE AI
+                logger.info("🤖 Competitive AI: Starting...")
+                self.strategy = CompetitiveAI(self.websocket)
+                
+                # 🔥 Set timeout untuk receive loop
+                try:
+                    await asyncio.wait_for(
+                        self.websocket.receive_loop(self.strategy.handle_message),
+                        timeout=300.0  # 5 menit timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️ Receive loop timeout! Game may be dead.")
+                    self.game_ended = True
+                    await self._cleanup()
+                    return
+                
+                await self._cleanup()
+                self.game_ended = True
+                logger.info("✅ Game ended - will join next game")
+                return
+                
+            except Exception as e:
+                logger.error(f"❌ Force join error (attempt {attempt + 1}): {e}")
+                await self._cleanup()
+                await asyncio.sleep(2)
+                await self._force_refresh_state()
+        
+        logger.error("❌ All force join attempts failed")
+        self.game_ended = False
+        self.join_attempts = 0
+        await asyncio.sleep(5)
+    
+    def _on_game_ended(self):
+        """Callback ketika game ended"""
+        logger.info("🏁 Game ended - triggering competitive AI")
+        self.game_ended = True
+        self.force_join_attempted = False
+    
+    # ... (method lainnya sama seperti sebelumnya)
 
 class Heartbeat:
     def __init__(self):
