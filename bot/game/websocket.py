@@ -20,9 +20,9 @@ class GameWebSocket:
         self.max_backoff = 30
         self.on_game_ended = None
         self.self_token = None
+        self.last_agent_view_time = 0  # 🔥 Tracking last agent_view
         
     async def connect(self, entry_type: str = "free") -> bool:
-        """Connect ke Claw Royale via /ws/join"""
         try:
             version = await self.client.get_version()
             if not version:
@@ -36,7 +36,6 @@ class GameWebSocket:
             
             logger.info(f"🔌 Connecting to {Config.WS_JOIN_URL}")
             
-            # Try multiple connection methods
             try:
                 self.websocket = await websockets.connect(
                     Config.WS_JOIN_URL,
@@ -103,25 +102,19 @@ class GameWebSocket:
             
             logger.info(f"   ✅ Assigned to game: {self.game_id}")
             if self.self_token:
-                logger.debug(f"   🎯 Self-token: {self.self_token}")
+                logger.info(f"   🎯 Self-token: {self.self_token}")
             
             self.connected = True
             self.is_alive = True
             self.reconnect_attempts = 0
+            self.last_agent_view_time = asyncio.get_event_loop().time()
             return True
             
-        except websockets.WebSocketException as e:
-            logger.error(f"❌ WebSocket error: {e}")
-            return False
-        except asyncio.TimeoutError:
-            logger.error("❌ Connection timeout!")
-            return False
         except Exception as e:
             logger.error(f"❌ Connection error: {e}")
             return False
     
     async def resume_game(self, entry_type: str) -> bool:
-        """Resume game yang sudah ada via /ws/agent"""
         try:
             version = await self.client.get_version()
             if not version:
@@ -170,6 +163,7 @@ class GameWebSocket:
             self.connected = True
             self.is_alive = True
             self.reconnect_attempts = 0
+            self.last_agent_view_time = asyncio.get_event_loop().time()
             logger.info("   ✅ Resumed successfully")
             return True
             
@@ -178,65 +172,81 @@ class GameWebSocket:
             return False
     
     async def receive_loop(self, message_handler: Callable):
-        """Main receive loop dengan auto-reconnect"""
+        """Main receive loop dengan force agent_view request"""
         logger.info("🔄 Receive loop started")
+        
+        no_agent_view_count = 0
+        max_no_agent_view = 5  # 🔥 Jika 5 turn tanpa agent_view, force request
         
         try:
             while self.websocket and self.is_alive and self.connected:
                 try:
-                    msg = json.loads(await asyncio.wait_for(self.websocket.recv(), timeout=30.0))
-                    msg_type = msg.get("type")
+                    # 🔥 Cek apakah ada agent_view dalam 10 detik terakhir
+                    current_time = asyncio.get_event_loop().time()
+                    if current_time - self.last_agent_view_time > 10:
+                        no_agent_view_count += 1
+                        logger.warning(f"⚠️ No agent_view for {no_agent_view_count} checks")
+                        
+                        # 🔥 Jika terlalu lama tanpa agent_view, kirim request
+                        if no_agent_view_count >= max_no_agent_view:
+                            logger.error("❌ No agent_view received! Attempting to request...")
+                            # Kirim ping untuk refresh state
+                            try:
+                                await self.websocket.send(json.dumps({"type": "ping"}))
+                                logger.info("📤 Sent ping to refresh state")
+                            except:
+                                pass
+                            no_agent_view_count = 0
+                    
+                    # Wait for message
+                    message = await asyncio.wait_for(self.websocket.recv(), timeout=30.0)
+                    data = json.loads(message)
+                    msg_type = data.get("type")
+                    
+                    # 🔥 TRACK agent_view
+                    if msg_type == "agent_view":
+                        self.last_agent_view_time = current_time
+                        no_agent_view_count = 0
+                        logger.info(f"📨 [agent_view] Received! Turn: {data.get('turn', 'unknown')}")
+                    
+                    # Log semua message (kecuali terlalu sering)
+                    if msg_type not in ["agent_view", "turn_advanced"]:
+                        logger.info(f"📨 [MSG] Type: {msg_type}")
                     
                     # ── DEATH DETECTION ──
                     if msg_type == "agent_died":
-                        meta = msg.get("meta", {})
+                        meta = data.get("meta", {})
                         if meta.get("youDied") == True:
-                            logger.info("💀 🔥 YOU DIED!")
+                            logger.info("💀 YOU DIED!")
                             self.is_alive = False
                             self.connected = False
-                            await message_handler(msg)
+                            await message_handler(data)
                             if self.on_game_ended:
                                 self.on_game_ended()
                             break
                         else:
-                            logger.debug(f"💀 Agent died: {msg.get('agentId')}")
+                            logger.debug(f"💀 Agent died: {data.get('agentId')}")
                             continue
                     
                     if msg_type == "game_ended":
                         logger.info("🏁 GAME ENDED")
                         self.is_alive = False
                         self.connected = False
-                        await message_handler(msg)
+                        await message_handler(data)
                         if self.on_game_ended:
                             self.on_game_ended()
                         break
                     
-                    if msg_type == "action_result":
-                        result = msg.get("result", {})
-                        if not result.get("success"):
-                            error = result.get("error", {})
-                            if error.get("code") == "AGENT_DEAD":
-                                logger.info("💀 🔥 YOU DIED! (via action_result)")
-                                self.is_alive = False
-                                self.connected = False
-                                dummy_msg = {
-                                    "type": "agent_died",
-                                    "meta": {"youDied": True},
-                                    "agentId": self.self_token
-                                }
-                                await message_handler(dummy_msg)
-                                if self.on_game_ended:
-                                    self.on_game_ended()
-                                break
-                    
                     # Handle normal message
-                    await message_handler(msg)
+                    await message_handler(data)
                     
                 except asyncio.TimeoutError:
+                    logger.warning("⚠️ Receive timeout, sending ping...")
                     try:
                         await self.websocket.send(json.dumps({"type": "ping"}))
                         logger.debug("💓 Ping sent")
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ping failed: {e}")
                         # Reconnect logic
                         if self.reconnect_attempts < self.max_reconnect_attempts:
                             wait = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
@@ -270,7 +280,6 @@ class GameWebSocket:
             logger.info("🔄 Receive loop ended")
     
     async def _reconnect(self):
-        """Reconnect dengan exponential backoff"""
         try:
             if self.websocket:
                 await self.websocket.close()
@@ -328,7 +337,6 @@ class GameWebSocket:
             logger.error(f"❌ Reconnect failed: {e}")
     
     async def send_action(self, action: Dict) -> bool:
-        """Send action ke game"""
         try:
             if not self.websocket or not self.is_alive or not self.connected:
                 logger.warning("⚠️ Cannot send action: not connected or dead")
@@ -345,7 +353,6 @@ class GameWebSocket:
             return False
     
     async def close(self):
-        """Close WebSocket connection"""
         self.connected = False
         self.is_alive = False
         
