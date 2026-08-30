@@ -9,6 +9,7 @@ except ImportError:
     pass
 
 class Config:
+    # API Configuration
     BASE_URL = os.getenv("API_BASE_URL", "https://cdn.clawroyale.ai/api")
     WS_JOIN_URL = os.getenv("WS_JOIN_URL", "wss://cdn.clawroyale.ai/ws/join")
     WS_AGENT_URL = os.getenv("WS_AGENT_URL", "wss://cdn.clawroyale.ai/ws/agent")
@@ -19,6 +20,7 @@ class Config:
         "https://api.clawroyale.ai/api"
     ]
     
+    # Authentication
     API_KEY = os.getenv("API_KEY")
     
     @classmethod
@@ -28,13 +30,16 @@ class Config:
             return False
         return True
     
+    # Bot Settings
     AGENT_NAME = os.getenv("AGENT_NAME", "ClawBot")
     ROOM_MODE = os.getenv("ROOM_MODE", "free")
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     
+    # Railway
     RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN")
     RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "production")
     
+    # Storage
     BASE_PATH = os.getenv("DATA_PATH", "/app/data")
     
     @classmethod
@@ -45,6 +50,7 @@ class Config:
     
     VERSION_CACHE_FILE = f"{BASE_PATH}/cache/version_cache.json"
     
+    # Web Dashboard
     WEB_PORT = int(os.getenv("WEB_PORT", 8080))
     WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
     
