@@ -1,3 +1,5 @@
 # Strategy Package
-from .adaptive_ai import AdaptiveAI, ActionType, ActionScore
+from .competitive_ai import CompetitiveAI
 from .loadout import LoadoutManager
+
+__all__ = ['CompetitiveAI', 'LoadoutManager']
