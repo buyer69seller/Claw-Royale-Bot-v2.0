@@ -38,7 +38,6 @@ class Heartbeat:
             logger.error("❌ API_KEY is not configured!")
             return
         
-        # Auto-setup jika perlu
         if not self.setup_attempted:
             await self._auto_setup()
         
@@ -65,7 +64,6 @@ class Heartbeat:
                 self.supervisor_retry_count = 0
     
     async def _auto_setup(self):
-        """Auto setup jika readiness None"""
         logger.info("🔧 Auto-setup: Checking account readiness...")
         self.setup_attempted = True
         
@@ -83,7 +81,6 @@ class Heartbeat:
             
             logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
             
-            # Jika freeReady None, coba setup
             if free_ready is None:
                 logger.info("   🔧 freeReady is None - attempting setup...")
                 
@@ -93,22 +90,12 @@ class Heartbeat:
                     if result.get("success"):
                         logger.info("   ✅ WELCOME bundle redeemed!")
                         await asyncio.sleep(2)
-                        # Refresh account
                         await self.client.get_account()
                     else:
                         logger.warning(f"   ⚠️ Redeem failed: {result}")
                 except Exception as e:
                     logger.warning(f"   ⚠️ Redeem error: {e}")
                 
-                # Coba setup identity (ERC-8004 optional)
-                try:
-                    # Identity is optional as of 1.11.2
-                    # But may help with readiness
-                    logger.info("   ℹ️ Identity is optional, skipping...")
-                except Exception as e:
-                    logger.warning(f"   ⚠️ Identity error: {e}")
-                
-                # Refresh readiness
                 await asyncio.sleep(3)
                 account = await self.client.get_account()
                 if account and account.get("data"):
@@ -116,10 +103,8 @@ class Heartbeat:
                     free_ready = readiness.get("freeReady")
                     logger.info(f"   📊 After setup: freeReady={free_ready}")
             
-            # Jika masih None, coba force join
             if free_ready is None or free_ready == False:
                 logger.warning("⚠️ freeReady not available - attempting force join...")
-                # Coba join free room anyway
                 await self._force_join_free()
                 
         except Exception as e:
@@ -130,6 +115,7 @@ class Heartbeat:
         logger.info("🔧 Force joining free room...")
         
         try:
+            # Buat WebSocket baru
             self.websocket = GameWebSocket()
             connected = await self.websocket.connect("free")
             
@@ -137,15 +123,18 @@ class Heartbeat:
                 logger.info("✅ Force joined free room!")
                 self.last_game_id = self.websocket.game_id
                 
+                # Start strategy
                 self.strategy = GameStrategy(self.websocket)
                 await self.websocket.receive_loop(self.strategy.handle_message)
                 
                 await self._cleanup()
             else:
-                logger.error("❌ Force join failed")
+                logger.error("❌ Force join failed - will retry later")
                 
         except Exception as e:
             logger.error(f"❌ Force join error: {e}")
+            # Cleanup
+            await self._cleanup()
     
     async def _main_loop(self):
         while self.running:
@@ -173,18 +162,15 @@ class Heartbeat:
                 elif state == AgentState.IDLE:
                     logger.info("😴 Idle - waiting for games")
                     
-                    # Jika freeReady None, coba force join
                     if not self.setup_attempted:
                         await self._auto_setup()
                     
                     if self.last_game_id:
                         await self._handle_reconnect()
-                    else:
-                        # Coba force join jika idle terlalu lama
-                        if self.reconnect_attempts > 3:
-                            logger.info("🔧 Idle too long - attempting force join...")
-                            await self._force_join_free()
-                            self.reconnect_attempts = 0
+                    elif self.reconnect_attempts > 3:
+                        logger.info("🔧 Idle too long - attempting force join...")
+                        await self._force_join_free()
+                        self.reconnect_attempts = 0
                     
                     await asyncio.sleep(30)
                 elif state == AgentState.ERROR:
@@ -219,13 +205,11 @@ class Heartbeat:
                 free_ready = readiness.get("freeReady")
                 paid_ready = readiness.get("paidReady", False)
                 
-                # Log dengan jelas
                 if free_ready is None:
                     logger.warning(f"   ⚠️ freeReady: None (may need setup)")
                 else:
                     logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
                 
-                # Cek active games
                 games = data.get("currentGames", [])
                 if games:
                     for g in games:
@@ -236,7 +220,6 @@ class Heartbeat:
                 self.client.is_logged_in = True
                 self.login_attempted = True
                 
-                # Auto-setup jika freeReady None
                 if free_ready is None and not self.setup_attempted:
                     await self._auto_setup()
             else:
@@ -248,7 +231,6 @@ class Heartbeat:
             self.login_attempted = True
     
     async def _handle_reconnect(self):
-        """Auto reconnect dengan exponential backoff"""
         if self.reconnect_attempts > self.max_reconnect_attempts:
             logger.warning(f"⚠️ Max reconnect attempts reached")
             self.reconnect_attempts = 0
@@ -322,7 +304,6 @@ class Heartbeat:
         self.reconnect_attempts = 0
         
         try:
-            # Auto-matchmaking
             if Config.ROOM_MODE == "auto":
                 logger.info("   🔄 Auto mode: trying paid first...")
                 if await self._try_join("paid"):
@@ -342,7 +323,6 @@ class Heartbeat:
             logger.info(f"✅ Game ended - looking for next game")
     
     async def _try_join(self, entry_type: str) -> bool:
-        """Try to join a game"""
         logger.info(f"📦 Checking loadout...")
         await self.loadout_manager.configure_full_loadout()
         
