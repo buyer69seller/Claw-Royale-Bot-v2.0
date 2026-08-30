@@ -19,27 +19,29 @@ class Heartbeat:
         self.login_attempted = False
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
-        self.base_backoff = 1  # detik
-        self.max_backoff = 30  # detik
+        self.base_backoff = 1
+        self.max_backoff = 30
         self.last_game_id = None
         self.supervisor_retry_count = 0
         self.max_supervisor_retries = 10
+        self.setup_attempted = False
         
     async def run(self):
-        """Main loop dengan supervisor auto-restart"""
         logger.info(f"Starting Claw Royale Bot: {Config.AGENT_NAME}")
         logger.info("=" * 50)
         logger.info("🦞 CLAW ROYALE BOT - SUPERVISOR ENABLED")
         logger.info("=" * 50)
         
-        # Login
         if self.client._has_api_key():
             await self._login()
         else:
             logger.error("❌ API_KEY is not configured!")
             return
         
-        # Supervisor loop - auto restart jika error
+        # Auto-setup jika perlu
+        if not self.setup_attempted:
+            await self._auto_setup()
+        
         while self.running:
             try:
                 await self._main_loop()
@@ -52,20 +54,100 @@ class Heartbeat:
                     logger.error("❌ Max supervisor retries reached. Stopping...")
                     break
                 
-                # Exponential backoff untuk supervisor
                 wait_time = min(self.base_backoff * (2 ** self.supervisor_retry_count), self.max_backoff)
                 logger.info(f"   Waiting {wait_time}s before restart...")
                 await asyncio.sleep(wait_time)
                 
-                # Reset state untuk restart
                 if self.websocket:
                     await self.websocket.close()
                     self.websocket = None
                 self.strategy = None
                 self.supervisor_retry_count = 0
     
+    async def _auto_setup(self):
+        """Auto setup jika readiness None"""
+        logger.info("🔧 Auto-setup: Checking account readiness...")
+        self.setup_attempted = True
+        
+        try:
+            account = await self.client.get_account()
+            if not account or not account.get("data"):
+                logger.warning("⚠️ Cannot get account data")
+                return
+            
+            data = account.get("data", {})
+            readiness = data.get("readiness", {})
+            
+            free_ready = readiness.get("freeReady")
+            paid_ready = readiness.get("paidReady", False)
+            
+            logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
+            
+            # Jika freeReady None, coba setup
+            if free_ready is None:
+                logger.info("   🔧 freeReady is None - attempting setup...")
+                
+                # Coba redeem WELCOME bundle
+                try:
+                    result = await self.client.redeem_code("WELCOME")
+                    if result.get("success"):
+                        logger.info("   ✅ WELCOME bundle redeemed!")
+                        await asyncio.sleep(2)
+                        # Refresh account
+                        await self.client.get_account()
+                    else:
+                        logger.warning(f"   ⚠️ Redeem failed: {result}")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Redeem error: {e}")
+                
+                # Coba setup identity (ERC-8004 optional)
+                try:
+                    # Identity is optional as of 1.11.2
+                    # But may help with readiness
+                    logger.info("   ℹ️ Identity is optional, skipping...")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Identity error: {e}")
+                
+                # Refresh readiness
+                await asyncio.sleep(3)
+                account = await self.client.get_account()
+                if account and account.get("data"):
+                    readiness = account.get("data", {}).get("readiness", {})
+                    free_ready = readiness.get("freeReady")
+                    logger.info(f"   📊 After setup: freeReady={free_ready}")
+            
+            # Jika masih None, coba force join
+            if free_ready is None or free_ready == False:
+                logger.warning("⚠️ freeReady not available - attempting force join...")
+                # Coba join free room anyway
+                await self._force_join_free()
+                
+        except Exception as e:
+            logger.error(f"❌ Auto-setup error: {e}")
+    
+    async def _force_join_free(self):
+        """Force join free room tanpa menunggu readiness"""
+        logger.info("🔧 Force joining free room...")
+        
+        try:
+            self.websocket = GameWebSocket()
+            connected = await self.websocket.connect("free")
+            
+            if connected:
+                logger.info("✅ Force joined free room!")
+                self.last_game_id = self.websocket.game_id
+                
+                self.strategy = GameStrategy(self.websocket)
+                await self.websocket.receive_loop(self.strategy.handle_message)
+                
+                await self._cleanup()
+            else:
+                logger.error("❌ Force join failed")
+                
+        except Exception as e:
+            logger.error(f"❌ Force join error: {e}")
+    
     async def _main_loop(self):
-        """Main game loop dengan auto-reconnect"""
         while self.running:
             try:
                 if not self.client.is_logged_in:
@@ -90,9 +172,20 @@ class Heartbeat:
                     await self._handle_start_game("paid")
                 elif state == AgentState.IDLE:
                     logger.info("😴 Idle - waiting for games")
-                    # Auto-reconnect jika ada game yang terputus
+                    
+                    # Jika freeReady None, coba force join
+                    if not self.setup_attempted:
+                        await self._auto_setup()
+                    
                     if self.last_game_id:
                         await self._handle_reconnect()
+                    else:
+                        # Coba force join jika idle terlalu lama
+                        if self.reconnect_attempts > 3:
+                            logger.info("🔧 Idle too long - attempting force join...")
+                            await self._force_join_free()
+                            self.reconnect_attempts = 0
+                    
                     await asyncio.sleep(30)
                 elif state == AgentState.ERROR:
                     logger.error("⚠️ Bot in error state")
@@ -102,16 +195,62 @@ class Heartbeat:
                 
             except Exception as e:
                 logger.error(f"Main loop error: {e}", exc_info=True)
-                # Exponential backoff untuk error
                 wait_time = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
                 logger.info(f"   Backoff: waiting {wait_time}s")
                 await asyncio.sleep(wait_time)
                 self.reconnect_attempts = min(self.reconnect_attempts + 1, 5)
     
+    async def _login(self):
+        if self.login_attempted:
+            return
+        
+        logger.info("🔐 Logging in...")
+        
+        try:
+            account = await self.client.get_account()
+            
+            if account and account.get("data"):
+                data = account.get("data", {})
+                logger.info(f"✅ Login successful!")
+                logger.info(f"   Account: {data.get('name', 'Unknown')} (ID: {data.get('id')})")
+                logger.info(f"   Balance: {data.get('balance', 0)} sMoltz")
+                
+                readiness = data.get("readiness", {})
+                free_ready = readiness.get("freeReady")
+                paid_ready = readiness.get("paidReady", False)
+                
+                # Log dengan jelas
+                if free_ready is None:
+                    logger.warning(f"   ⚠️ freeReady: None (may need setup)")
+                else:
+                    logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
+                
+                # Cek active games
+                games = data.get("currentGames", [])
+                if games:
+                    for g in games:
+                        if g.get('isAlive'):
+                            self.last_game_id = g.get('gameId')
+                            logger.info(f"   🎮 Active game: {self.last_game_id}")
+                
+                self.client.is_logged_in = True
+                self.login_attempted = True
+                
+                # Auto-setup jika freeReady None
+                if free_ready is None and not self.setup_attempted:
+                    await self._auto_setup()
+            else:
+                logger.error("❌ Login failed")
+                self.login_attempted = True
+                
+        except Exception as e:
+            logger.error(f"❌ Login error: {e}")
+            self.login_attempted = True
+    
     async def _handle_reconnect(self):
         """Auto reconnect dengan exponential backoff"""
         if self.reconnect_attempts > self.max_reconnect_attempts:
-            logger.warning(f"⚠️ Max reconnect attempts ({self.max_reconnect_attempts}) reached")
+            logger.warning(f"⚠️ Max reconnect attempts reached")
             self.reconnect_attempts = 0
             self.last_game_id = None
             return
@@ -148,7 +287,6 @@ class Heartbeat:
                         return
                     break
             
-            # Game not found or ended
             logger.info(f"   ℹ️ Game {self.last_game_id} ended")
             self.last_game_id = None
             self.reconnect_attempts = 0
@@ -156,43 +294,7 @@ class Heartbeat:
         except Exception as e:
             logger.error(f"❌ Reconnect error: {e}")
     
-    async def _login(self):
-        if self.login_attempted:
-            return
-        
-        logger.info("🔐 Logging in...")
-        
-        try:
-            account = await self.client.get_account()
-            
-            if account and account.get("data"):
-                data = account.get("data", {})
-                logger.info(f"✅ Login successful!")
-                logger.info(f"   Account: {data.get('name', 'Unknown')} (ID: {data.get('id')})")
-                logger.info(f"   Balance: {data.get('balance', 0)} sMoltz")
-                
-                readiness = data.get("readiness", {})
-                logger.info(f"   Readiness: freeReady={readiness.get('freeReady')}, paidReady={readiness.get('paidReady')}")
-                
-                # Cek active games
-                games = data.get("currentGames", [])
-                if games:
-                    for g in games:
-                        if g.get('isAlive'):
-                            self.last_game_id = g.get('gameId')
-                
-                self.client.is_logged_in = True
-                self.login_attempted = True
-            else:
-                logger.error("❌ Login failed")
-                self.login_attempted = True
-                
-        except Exception as e:
-            logger.error(f"❌ Login error: {e}")
-            self.login_attempted = True
-    
     async def _handle_game(self, entry_type: str):
-        """Resume existing game"""
         logger.info(f"📌 Resuming {entry_type} game...")
         self.reconnect_attempts = 0
         
@@ -216,14 +318,12 @@ class Heartbeat:
             logger.info(f"✅ {entry_type} game ended - looking for next game")
     
     async def _handle_start_game(self, entry_type: str):
-        """Start new game dengan auto-matchmaking"""
         logger.info(f"🎯 Starting new {entry_type} game...")
         self.reconnect_attempts = 0
         
         try:
-            # Auto-matchmaking: pilih mode berdasarkan ROOM_MODE
+            # Auto-matchmaking
             if Config.ROOM_MODE == "auto":
-                # Coba paid dulu, fallback ke free
                 logger.info("   🔄 Auto mode: trying paid first...")
                 if await self._try_join("paid"):
                     return
@@ -233,7 +333,6 @@ class Heartbeat:
                 logger.error("❌ No rooms available!")
                 return
             else:
-                # Gunakan mode yang ditentukan
                 await self._try_join(entry_type)
             
         except Exception as e:
@@ -243,7 +342,7 @@ class Heartbeat:
             logger.info(f"✅ Game ended - looking for next game")
     
     async def _try_join(self, entry_type: str) -> bool:
-        """Try to join a game dengan auto-matchmaking"""
+        """Try to join a game"""
         logger.info(f"📦 Checking loadout...")
         await self.loadout_manager.configure_full_loadout()
         
@@ -265,7 +364,6 @@ class Heartbeat:
         return True
     
     async def _cleanup(self):
-        """Cleanup WebSocket"""
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
