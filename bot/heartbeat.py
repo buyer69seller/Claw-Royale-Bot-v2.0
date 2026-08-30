@@ -27,9 +27,10 @@ class Heartbeat:
         self.setup_attempted = False
         self.game_ended = False
         self.join_attempts = 0
-        self.max_join_attempts = 5  # Tambah dari 3 ke 5
+        self.max_join_attempts = 5
         self.idle_refresh_count = 0
         self.max_idle_refresh = 3
+        self.force_join_attempted = False
         
     async def run(self):
         logger.info(f"Starting Claw Royale Bot: {Config.AGENT_NAME}")
@@ -43,6 +44,7 @@ class Heartbeat:
             logger.error("❌ API_KEY is not configured!")
             return
         
+        # 🔥 Skip auto-setup, langsung force join jika freeReady None
         if not self.setup_attempted:
             await self._auto_setup()
         
@@ -77,20 +79,25 @@ class Heartbeat:
                     await asyncio.sleep(5)
                     continue
                 
-                # 🔥 FORCED REFRESH: Jika game ended, refresh state secara paksa
+                # 🔥 FORCE JOIN: Jika freeReady None dan belum force join
+                if not self.force_join_attempted and self.client.account_data:
+                    free_ready = self.client.account_data.get("readiness", {}).get("freeReady")
+                    if free_ready is None or free_ready == False:
+                        logger.info("🔧 freeReady not available - attempting force join...")
+                        await self._force_join_free()
+                        self.force_join_attempted = True
+                        continue
+                
+                # Jika game ended, refresh state dan cari game baru
                 if self.game_ended:
                     logger.info("🔄 Game ended - refreshing state and searching for next game...")
                     self.game_ended = False
                     self.join_attempts = 0
                     self.idle_refresh_count = 0
                     
-                    # Tunggu sebentar agar server siap
                     await asyncio.sleep(2)
-                    
-                    # 🔥 Paksa refresh state
                     await self._force_refresh_state()
                     
-                    # Coba join dengan retry
                     joined = await self._find_and_join_game()
                     
                     if not joined:
@@ -102,13 +109,12 @@ class Heartbeat:
                             logger.info(f"   Retry {self.join_attempts}/{self.max_join_attempts}")
                             await asyncio.sleep(5)
                         else:
-                            # Force join setelah beberapa kali gagal
                             logger.info("🔧 Force joining after retries...")
                             await self._force_join_free()
                             self.join_attempts = 0
                     continue
                 
-                # Normal state check - tapi refresh lebih sering
+                # Normal state check
                 if self.idle_refresh_count >= self.max_idle_refresh:
                     logger.info("🔄 Refreshing state (idle too long)...")
                     await self._force_refresh_state()
@@ -132,15 +138,10 @@ class Heartbeat:
                     logger.info("😴 Idle - waiting for games")
                     self.idle_refresh_count += 1
                     
-                    if not self.setup_attempted:
-                        await self._auto_setup()
-                    
-                    # 🔥 Coba reconnect jika ada game yang terputus
                     if self.last_game_id and not self.game_ended:
                         logger.info(f"🔄 Attempting to rejoin game {self.last_game_id}...")
                         await self._handle_reconnect()
                     
-                    # 🔥 Jika idle terlalu lama, paksa refresh dan coba force join
                     if self.idle_refresh_count >= self.max_idle_refresh:
                         logger.info("🔧 Idle too long - forcing refresh and join...")
                         await self._force_refresh_state()
@@ -148,7 +149,7 @@ class Heartbeat:
                         self.idle_refresh_count = 0
                         self.reconnect_attempts = 0
                     
-                    await asyncio.sleep(10)  # Kurangi delay dari 30 ke 10
+                    await asyncio.sleep(10)
                 elif state == AgentState.ERROR:
                     logger.error("⚠️ Bot in error state")
                     await asyncio.sleep(10)
@@ -163,21 +164,18 @@ class Heartbeat:
                 self.reconnect_attempts = min(self.reconnect_attempts + 1, 5)
     
     async def _force_refresh_state(self):
-        """🔥 Paksa refresh state dengan invalidate cache"""
+        """Paksa refresh state dengan invalidate cache"""
         logger.debug("🔄 Forcing state refresh...")
         try:
-            # Invalidate cache di APIClient
             self.client.account_data = None
             self.client.is_logged_in = False
             
-            # Paksa refresh dengan get_account
             account = await self.client.get_account()
             if account and account.get("data"):
                 self.client.is_logged_in = True
                 self.client.account_data = account.get("data")
                 logger.debug("   ✅ State refreshed")
                 
-                # Update game status
                 games = self.client.account_data.get("currentGames", [])
                 if games:
                     for g in games:
@@ -194,10 +192,8 @@ class Heartbeat:
         logger.info("🔍 Searching for available game...")
         
         try:
-            # 🔥 Paksa refresh sebelum cari game
             await self._force_refresh_state()
             
-            # Cek state
             state = await self.router.check_state()
             
             if state == AgentState.READY_FREE:
@@ -260,8 +256,9 @@ class Heartbeat:
                 self.client.is_logged_in = True
                 self.login_attempted = True
                 
-                if free_ready is None and not self.setup_attempted:
-                    await self._auto_setup()
+                # 🔥 Jika freeReady None, langsung force join
+                if free_ready is None and not self.force_join_attempted:
+                    logger.info("🔧 freeReady is None - will force join...")
             else:
                 logger.error("❌ Login failed - check API_KEY")
                 self.login_attempted = True
@@ -271,11 +268,11 @@ class Heartbeat:
             self.login_attempted = True
     
     async def _auto_setup(self):
+        """Auto setup - skip redeem, langsung force join"""
         logger.info("🔧 Auto-setup: Checking account readiness...")
         self.setup_attempted = True
         
         try:
-            # 🔥 Paksa refresh
             await self._force_refresh_state()
             
             account = await self.client.get_account()
@@ -291,45 +288,26 @@ class Heartbeat:
             
             logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
             
-            if free_ready is None:
-                logger.info("   🔧 freeReady is None - attempting setup...")
-                
-                try:
-                    result = await self.client.redeem_code("WELCOME")
-                    if result.get("success"):
-                        logger.info("   ✅ WELCOME bundle redeemed!")
-                        await asyncio.sleep(2)
-                        await self._force_refresh_state()
-                    else:
-                        logger.warning(f"   ⚠️ Redeem failed: {result}")
-                except Exception as e:
-                    logger.warning(f"   ⚠️ Redeem error: {e}")
-                
-                await asyncio.sleep(3)
-                await self._force_refresh_state()
-                account = await self.client.get_account()
-                if account and account.get("data"):
-                    readiness = account.get("data", {}).get("readiness", {})
-                    free_ready = readiness.get("freeReady")
-                    logger.info(f"   📊 After setup: freeReady={free_ready}")
-            
+            # 🔥 SKIP REDEEM - langsung force join
             if free_ready is None or free_ready == False:
-                logger.warning("⚠️ freeReady not available - attempting force join...")
+                logger.info("   🔧 freeReady not available - skipping setup and forcing join...")
                 await self._force_join_free()
+                self.force_join_attempted = True
                 
         except Exception as e:
             logger.error(f"❌ Auto-setup error: {e}")
     
     async def _force_join_free(self):
-        """Force join free room dengan retry"""
-        logger.info("🔧 Force joining free room...")
+        """Force join free room - langsung connect tanpa readiness"""
+        logger.info("🔧 Force joining free room (bypassing readiness check)...")
         
-        # 🔥 Paksa refresh sebelum force join
-        await self._force_refresh_state()
+        # 🔥 Reset state sebelum force join
+        self.force_join_attempted = True
         
         max_force_attempts = 3
         for attempt in range(max_force_attempts):
             try:
+                # Buat WebSocket baru
                 self.websocket = GameWebSocket()
                 connected = await self.websocket.connect("free")
                 
@@ -340,6 +318,7 @@ class Heartbeat:
                     self.join_attempts = 0
                     self.idle_refresh_count = 0
                     
+                    # Start gameplay
                     self.strategy = GameStrategy(self.websocket)
                     await self.websocket.receive_loop(self.strategy.handle_message)
                     
@@ -350,7 +329,6 @@ class Heartbeat:
                 else:
                     logger.warning(f"⚠️ Force join attempt {attempt + 1}/{max_force_attempts} failed")
                     await asyncio.sleep(3)
-                    # 🔥 Refresh lagi sebelum retry
                     await self._force_refresh_state()
                     
             except Exception as e:
@@ -362,6 +340,8 @@ class Heartbeat:
         logger.error("❌ All force join attempts failed")
         self.game_ended = False
         self.join_attempts = 0
+        # 🔥 Jika force join gagal, tunggu dan retry nanti
+        await asyncio.sleep(10)
     
     async def _handle_reconnect(self):
         """Auto reconnect dengan exponential backoff"""
@@ -379,7 +359,6 @@ class Heartbeat:
         self.reconnect_attempts += 1
         
         try:
-            # 🔥 Paksa refresh sebelum reconnect
             await self._force_refresh_state()
             
             account = await self.client.get_account()
