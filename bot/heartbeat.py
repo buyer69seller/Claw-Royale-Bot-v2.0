@@ -16,9 +16,6 @@ class Heartbeat:
         self.strategy = None
         self.running = True
         self.login_attempted = False
-        self.rejoin_attempts = 0
-        self.max_rejoin_attempts = 5
-        self.last_game_id = None
         
     async def run(self):
         logger.info(f"Starting Claw Royale Bot: {Config.AGENT_NAME}")
@@ -26,14 +23,12 @@ class Heartbeat:
         logger.info("🦞 CLAW ROYALE BOT - AUTO JOIN ENABLED")
         logger.info("=" * 50)
         
-        # Login
         if self.client._has_api_key():
             await self._login()
         else:
             logger.error("❌ API_KEY is not configured!")
             return
         
-        # Main loop
         while self.running:
             try:
                 if not self.client.is_logged_in:
@@ -42,7 +37,6 @@ class Heartbeat:
                     await asyncio.sleep(5)
                     continue
                 
-                # Check state
                 state = await self.router.check_state()
                 
                 if state == AgentState.IN_GAME_FREE:
@@ -59,16 +53,6 @@ class Heartbeat:
                     await self._handle_start_game("paid")
                 elif state == AgentState.IDLE:
                     logger.info("😴 Idle - waiting for games")
-                    
-                    # Coba rejoin jika ada game yang terputus
-                    if self.last_game_id and self.rejoin_attempts < self.max_rejoin_attempts:
-                        self.rejoin_attempts += 1
-                        logger.info(f"🔄 Rejoin attempt {self.rejoin_attempts}/{self.max_rejoin_attempts}")
-                        await self._handle_rejoin()
-                    else:
-                        self.rejoin_attempts = 0
-                        self.last_game_id = None
-                    
                     await asyncio.sleep(30)
                 elif state == AgentState.ERROR:
                     logger.error("⚠️ Bot in error state")
@@ -98,15 +82,6 @@ class Heartbeat:
                 readiness = data.get("readiness", {})
                 logger.info(f"   Readiness: freeReady={readiness.get('freeReady')}, paidReady={readiness.get('paidReady')}")
                 
-                # Cek active games
-                games = data.get("currentGames", [])
-                if games:
-                    logger.info(f"   🎮 Active games: {len(games)}")
-                    for g in games:
-                        logger.info(f"      - {g.get('entryType')}: {g.get('gameId')} (alive: {g.get('isAlive')})")
-                        if g.get('isAlive'):
-                            self.last_game_id = g.get('gameId')
-                
                 self.client.is_logged_in = True
                 self.login_attempted = True
             else:
@@ -118,19 +93,13 @@ class Heartbeat:
             self.login_attempted = True
     
     async def _handle_game(self, entry_type: str):
-        """Resume existing game"""
         logger.info(f"📌 Resuming {entry_type} game...")
-        
         try:
             self.websocket = GameWebSocket()
             connected = await self.websocket.resume_game(entry_type)
-            
             if not connected:
                 logger.error(f"❌ Failed to resume {entry_type} game")
                 return
-            
-            self.last_game_id = self.websocket.game_id
-            logger.info(f"✅ Resumed game: {self.last_game_id}")
             
             self.strategy = GameStrategy(self.websocket)
             await self.websocket.receive_loop(self.strategy.handle_message)
@@ -138,19 +107,18 @@ class Heartbeat:
         except Exception as e:
             logger.error(f"❌ Game error: {e}", exc_info=True)
         finally:
-            await self._cleanup()
+            if self.websocket:
+                await self.websocket.close()
+                self.websocket = None
+            self.strategy = None
     
     async def _handle_start_game(self, entry_type: str):
-        """Start new game"""
         logger.info(f"🎯 Starting new {entry_type} game...")
-        self.rejoin_attempts = 0
         
         try:
-            # Loadout
             logger.info("📦 Checking loadout...")
             await self.loadout_manager.configure_full_loadout()
             
-            # Connect
             logger.info("🔌 Connecting to game...")
             self.websocket = GameWebSocket()
             connected = await self.websocket.connect(entry_type)
@@ -159,10 +127,8 @@ class Heartbeat:
                 logger.error(f"❌ Failed to connect to {entry_type} room!")
                 return
             
-            self.last_game_id = self.websocket.game_id
-            logger.info(f"✅ Joined game: {self.last_game_id}")
+            logger.info(f"✅ Joined game: {self.websocket.game_id}")
             
-            # Play
             logger.info("🎮 Starting gameplay...")
             self.strategy = GameStrategy(self.websocket)
             await self.websocket.receive_loop(self.strategy.handle_message)
@@ -170,47 +136,7 @@ class Heartbeat:
         except Exception as e:
             logger.error(f"❌ Game error: {e}", exc_info=True)
         finally:
-            await self._cleanup()
-    
-    async def _handle_rejoin(self):
-        """Rejoin game yang terputus"""
-        try:
-            account = await self.client.get_account()
-            if not account or not account.get("data"):
-                return
-            
-            games = account.get("data", {}).get("currentGames", [])
-            
-            for game in games:
-                if game.get("gameId") == self.last_game_id and game.get("isAlive"):
-                    logger.info(f"   ✅ Game {self.last_game_id} still active!")
-                    entry_type = game.get("entryType", "free")
-                    
-                    self.websocket = GameWebSocket()
-                    connected = await self.websocket.resume_game(entry_type)
-                    
-                    if connected:
-                        logger.info(f"   ✅ Rejoined game {self.last_game_id}")
-                        self.rejoin_attempts = 0
-                        
-                        self.strategy = GameStrategy(self.websocket)
-                        await self.websocket.receive_loop(self.strategy.handle_message)
-                        
-                        await self._cleanup()
-                        return
-                    break
-            
-            # Game not found or ended
-            logger.info(f"   ℹ️ Game {self.last_game_id} ended")
-            self.last_game_id = None
-            self.rejoin_attempts = 0
-            
-        except Exception as e:
-            logger.error(f"❌ Rejoin error: {e}")
-    
-    async def _cleanup(self):
-        """Cleanup WebSocket"""
-        if self.websocket:
-            await self.websocket.close()
-            self.websocket = None
-        self.strategy = None
+            if self.websocket:
+                await self.websocket.close()
+                self.websocket = None
+            self.strategy = None
