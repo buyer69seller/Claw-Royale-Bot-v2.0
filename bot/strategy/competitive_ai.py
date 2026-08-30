@@ -18,6 +18,12 @@ OPTIMASI KECEPATAN:
                     DENGAN FULL LOGGING UNTUK DIAGNOSIS
 ================================================================================
 """
+"""
+================================================================================
+                    COMPETITIVE AI - FIXED VERSION
+                    DENGAN AUTO-RESET action_in_progress
+================================================================================
+"""
 
 import random
 import math
@@ -29,7 +35,7 @@ from ..utils.logger import logger
 
 class CompetitiveAI:
     """
-    DEBUG VERSION - Dengan full logging untuk diagnosis bot diam
+    FIXED VERSION - Dengan auto-reset action_in_progress
     """
     
     def __init__(self, websocket: GameWebSocket):
@@ -40,14 +46,15 @@ class CompetitiveAI:
         self.turn = 0
         self.is_dead = False
         self.action_in_progress = False
-        self.loop_iteration = 0
+        self.action_start_time = 0  # 🔥 Untuk timeout
+        self.action_timeout = 5.0   # 🔥 5 detik timeout
         
         # ── Stats ──
         self.kills = 0
         self.items_collected = 0
         self.survival_time = 0
         self.heals_used = 0
-        self.actions_sent = 0  # 🔥 TRACKING: jumlah action terkirim
+        self.actions_sent = 0
         
         # ── Self ──
         self.my_position = (0, 0)
@@ -55,8 +62,6 @@ class CompetitiveAI:
         self.my_max_hp = 100
         self.my_ep = 50
         self.my_max_ep = 50
-        self.my_atk = 5
-        self.my_def = 2
         self.in_cave = False
         self.cave_id = None
         self.alert_gauge = 0
@@ -95,21 +100,30 @@ class CompetitiveAI:
         # ── Debug ──
         self.last_action_time = 0
         self.consecutive_no_action = 0
-        self.max_consecutive_no_action = 3  # 🔥 Jika 3 turn no action, force action
-        
-        # ── First turn flag ──
         self.first_turn = True
+        
+        # ── Inventory ──
+        self.inventory = []
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 1. MAIN HANDLER - DENGAN FULL LOGGING
+    # 1. MAIN HANDLER
     # ═══════════════════════════════════════════════════════════════════════════
     
     async def handle_message(self, data: Dict):
-        """Main handler dengan full logging"""
+        """Main handler dengan auto-reset"""
         msg_type = data.get("type")
         
-        # ── 🔥 LOG SEMUA MESSAGE ──
-        logger.info(f"📨 [MSG] Type: {msg_type}")
+        # ── 🔥 AUTO-RESET: Cek timeout action ──
+        if self.action_in_progress:
+            elapsed = time.time() - self.action_start_time
+            if elapsed > self.action_timeout:
+                logger.warning(f"⏰ Action timeout! Resetting action_in_progress (elapsed: {elapsed:.1f}s)")
+                self.action_in_progress = False
+                self.action_start_time = 0
+                # 🔥 Coba action baru
+                if not self.is_dead and self.state.get("canAct", True):
+                    await self._decide_action()
+                return
         
         # ── DEATH DETECTION ──
         if msg_type == "agent_died":
@@ -126,17 +140,20 @@ class CompetitiveAI:
                 self.visible_agents = []
                 return
         
-        # ── ACTION RESULT ──
+        # ── 🔥 ACTION RESULT ──
         if msg_type == "action_result":
             result = data.get("result", {})
             if result.get("success"):
                 logger.info(f"✅ [ACTION] Successful!")
                 self.action_in_progress = False
+                self.action_start_time = 0
                 self.consecutive_no_action = 0
             else:
                 error = result.get("error", {})
                 error_code = error.get("code", "")
                 logger.warning(f"❌ [ACTION] Failed: {error_code}")
+                self.action_in_progress = False
+                self.action_start_time = 0
                 
                 if error_code == "AGENT_DEAD":
                     self.is_dead = True
@@ -146,21 +163,22 @@ class CompetitiveAI:
                     return
                 
                 elif error_code in ["TARGET_DEAD", "ACTION_FAILED"]:
-                    self.action_in_progress = False
                     self.visible_agents = []
+                    if self.state.get("canAct", True):
+                        await self._decide_action()
                     return
                 
                 elif error_code == "NOT_ENOUGH_EP":
                     logger.warning("⚡ Not enough EP!")
-                    self.action_in_progress = False
                     return
             
+            # 🔥 Setelah action_result, langsung decision lagi
+            if not self.is_dead and self.state.get("canAct", True):
+                await self._decide_action()
             return
         
-        # ── 🔥 AGENT VIEW ──
+        # ── AGENT VIEW ──
         if msg_type == "agent_view":
-            logger.info(f"📊 [AGENT_VIEW] Turn: {self.turn + 1}")
-            
             self.state = data.get("view", {})
             self.turn += 1
             self.survival_time = self.turn
@@ -168,53 +186,41 @@ class CompetitiveAI:
             # Update world
             self._update_world_state()
             
-            # ── 🔥 LOG STATUS ──
-            logger.info(f"   HP: {self.my_hp}/{self.my_max_hp}")
-            logger.info(f"   EP: {self.my_ep}/{self.my_max_ep}")
-            logger.info(f"   Position: ({self.my_position[0]}, {self.my_position[1]})")
-            logger.info(f"   Enemies: {len(self.visible_agents)}")
-            logger.info(f"   Items: {len(self.visible_items)}")
-            logger.info(f"   Ruins: {len(self.visible_ruins)}")
-            logger.info(f"   In Cave: {self.in_cave}")
-            logger.info(f"   Alert: {self.alert_gauge}")
-            
-            # ── 🔥 CEK CAN ACT ──
+            # 🔥 CEK CAN ACT
             can_act = data.get("canAct", True)
-            logger.info(f"   Can Act: {can_act}")
-            
             if not can_act:
-                logger.warning("⏳ Cannot act this turn (waiting)")
+                logger.debug(f"⏳ Cannot act this turn")
                 return
             
-            # ── 🔥 DECIDE ACTION ──
+            # 🔥 DECIDE ACTION
             if not self.is_dead:
-                logger.info("🎯 [DECISION] Starting decision...")
                 await self._decide_action()
-            else:
-                logger.warning("💀 Bot is dead!")
-            
-            self.loop_iteration += 1
-            self.first_turn = False
         
         # ── TURN ADVANCED ──
         elif msg_type == "turn_advanced":
-            logger.info(f"🔄 [TURN] Advanced to: {self.turn + 1}")
             self.turn += 1
             self.survival_time = self.turn
             
-            if self.state.get("canAct", True) and not self.is_dead:
+            # 🔥 Auto-reset jika action_in_progress terlalu lama
+            if self.action_in_progress:
+                elapsed = time.time() - self.action_start_time
+                if elapsed > self.action_timeout:
+                    logger.warning(f"⏰ Action timeout on turn_advanced! Resetting...")
+                    self.action_in_progress = False
+                    self.action_start_time = 0
+            
+            if self.state.get("canAct", True) and not self.is_dead and not self.action_in_progress:
                 await self._decide_action()
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # 2. WORLD UPDATE - DENGAN LOGGING
+    # 2. WORLD UPDATE
     # ═══════════════════════════════════════════════════════════════════════════
     
     def _update_world_state(self):
-        """Update world state dengan logging"""
+        """Update world state"""
         view = self.state
         self_section = view.get("self", {})
         
-        # Self
         self.my_position = (
             self_section.get("position", {}).get("x", 0),
             self_section.get("position", {}).get("y", 0)
@@ -226,18 +232,13 @@ class CompetitiveAI:
         self.in_cave = self_section.get("inCave", False)
         self.cave_id = self_section.get("caveId")
         self.alert_gauge = self_section.get("alertGauge", 0)
+        self.inventory = self_section.get("items", [])
         
-        # Enemies
         self.visible_agents = view.get("visibleAgents", [])
         self.visible_monsters = view.get("visibleMonsters", [])
-        
-        # Items
         self.visible_items = view.get("visibleItems", [])
-        
-        # Ruins
         self.visible_ruins = view.get("visibleRuins", [])
         
-        # Enemy positions
         self.enemy_positions = []
         for agent in self.visible_agents:
             pos = agent.get("position", {})
@@ -246,7 +247,6 @@ class CompetitiveAI:
             pos = monster.get("position", {})
             self.enemy_positions.append((pos.get("x", 0), pos.get("y", 0)))
         
-        # Death zone
         dz = view.get("deathZone", {})
         self.death_zone_center = (
             dz.get("center", {}).get("x", 10),
@@ -254,41 +254,35 @@ class CompetitiveAI:
         )
         self.death_zone_radius = dz.get("radius", 10)
         
-        # ── 🔥 LOG WORLD ──
-        logger.info(f"   Enemy positions: {self.enemy_positions}")
-        logger.info(f"   Death zone center: {self.death_zone_center}")
-        logger.info(f"   Death zone radius: {self.death_zone_radius}")
+        # ── Log setiap 5 turn ──
+        if self.turn % 5 == 0 and self.turn > 0:
+            logger.info(f"📊 T{self.turn}: HP={self.my_hp}/{self.my_max_hp}, "
+                       f"Pos=({self.my_position[0]},{self.my_position[1]}), "
+                       f"Enemies={len(self.visible_agents)}, Items={len(self.visible_items)}")
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # 3. DECISION ENGINE - DENGAN FORCE ACTION
+    # 3. DECISION ENGINE
     # ═══════════════════════════════════════════════════════════════════════════
     
     async def _decide_action(self):
-        """
-        DECISION ENGINE - Dengan force action jika tidak ada
-        """
+        """DECISION ENGINE - Dengan force action jika stuck"""
         try:
             if self.is_dead:
-                logger.warning("💀 Bot is dead, skipping decision")
                 return
             
+            # 🔥 JANGAN decision jika action_in_progress
             if self.action_in_progress:
-                logger.warning("⏳ Action already in progress")
-                return
+                elapsed = time.time() - self.action_start_time
+                if elapsed < self.action_timeout:
+                    logger.debug(f"⏳ Action in progress ({elapsed:.1f}s)")
+                    return
+                else:
+                    logger.warning(f"⏰ Force resetting action_in_progress")
+                    self.action_in_progress = False
+                    self.action_start_time = 0
             
             hp_percent = self.my_hp / self.my_max_hp
             ep_percent = self.my_ep / self.my_max_ep
-            
-            # ── 🔥 FORCE ACTION jika terlalu lama diam ──
-            if self.consecutive_no_action >= self.max_consecutive_no_action:
-                logger.warning(f"⚠️ No action for {self.consecutive_no_action} turns - FORCE ACTION!")
-                self.action_in_progress = True
-                await self._force_action()
-                self.consecutive_no_action = 0
-                return
-            
-            # ── 🔥 LOG DECISION ──
-            logger.info(f"🎯 [DECISION] HP%: {hp_percent:.2f}, EP%: {ep_percent:.2f}")
             
             # ═══════════════════════════════════════════════════════════════════
             # PRIORITY 1: SURVIVAL
@@ -296,72 +290,66 @@ class CompetitiveAI:
             
             # 1a. Escape cave
             if self.in_cave and self.cave_id:
-                logger.info("🚪 [ACTION] Escaping cave...")
+                logger.info("🚪 Escaping cave...")
                 self.action_in_progress = True
-                self.consecutive_no_action = 0
+                self.action_start_time = time.time()
                 self.actions_sent += 1
                 await self.websocket.send_action({
                     "type": "interact",
                     "interactableId": self.cave_id
                 })
-                logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                 return
             
             # 1b. Heal if critical
             if hp_percent < self.HP_CRITICAL:
                 heal_item = self._get_healing_item()
                 if heal_item:
-                    logger.info(f"💊 [ACTION] Healing with {heal_item.get('name', 'item')}")
+                    logger.info(f"💊 Healing with {heal_item.get('name', 'item')}")
                     self.action_in_progress = True
-                    self.consecutive_no_action = 0
+                    self.action_start_time = time.time()
                     self.actions_sent += 1
                     await self.websocket.send_action({
                         "type": "use_item",
                         "itemId": heal_item.get("id")
                     })
-                    logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                     return
                 else:
-                    logger.warning("🏃 [ACTION] Critical HP, retreating!")
+                    logger.warning("🏃 Critical HP, retreating!")
                     self.action_in_progress = True
-                    self.consecutive_no_action = 0
+                    self.action_start_time = time.time()
                     self.actions_sent += 1
                     await self._retreat()
-                    logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                     return
             
             # 1c. Retreat if low HP
             if hp_percent < self.HP_VERY_LOW:
-                logger.warning("🏃 [ACTION] Low HP, retreating!")
+                logger.warning("🏃 Low HP, retreating!")
                 self.action_in_progress = True
-                self.consecutive_no_action = 0
+                self.action_start_time = time.time()
                 self.actions_sent += 1
                 await self._retreat()
-                logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                 return
             
             # 1d. Move to safe zone
             if self._is_in_death_zone():
                 direction = self._get_safe_direction()
-                logger.info(f"🏃 [ACTION] Moving to safe zone: {direction}")
+                logger.info(f"🏃 Moving to safe zone: {direction}")
                 self.action_in_progress = True
-                self.consecutive_no_action = 0
+                self.action_start_time = time.time()
                 self.actions_sent += 1
                 await self.websocket.send_action({
                     "type": "move",
                     "direction": direction
                 })
-                logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                 return
             
             # 1e. Hide if alert high
             if self.alert_gauge > self.ALERT_HIGH:
-                logger.info(f"⚠️ [ACTION] Alert high ({self.alert_gauge}), hiding!")
+                logger.info(f"⚠️ Alert high ({self.alert_gauge}), hiding!")
                 self.action_in_progress = True
-                self.consecutive_no_action = 0
+                self.action_start_time = time.time()
                 self.actions_sent += 1
                 await self._retreat()
-                logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                 return
             
             # ═══════════════════════════════════════════════════════════════════
@@ -378,24 +366,22 @@ class CompetitiveAI:
                     )
                     
                     if distance <= self.LOOT_RANGE:
-                        logger.info(f"📦 [ACTION] Looting {nearest.get('name', 'item')}")
+                        logger.info(f"📦 Looting {nearest.get('name', 'item')}")
                         self.action_in_progress = True
-                        self.consecutive_no_action = 0
+                        self.action_start_time = time.time()
                         self.actions_sent += 1
                         await self.websocket.send_action({
                             "type": "collect",
                             "itemId": nearest.get("id")
                         })
                         self.items_collected += 1
-                        logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                         return
                     elif distance < 5:
-                        logger.info(f"🚶 [ACTION] Moving to item at distance {distance:.1f}")
+                        logger.info(f"🚶 Moving to item")
                         self.action_in_progress = True
-                        self.consecutive_no_action = 0
+                        self.action_start_time = time.time()
                         self.actions_sent += 1
                         await self._move_towards((pos.get("x", 0), pos.get("y", 0)))
-                        logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                         return
             
             # ═══════════════════════════════════════════════════════════════════
@@ -412,23 +398,21 @@ class CompetitiveAI:
                     )
                     
                     if distance <= self.ATTACK_RANGE:
-                        logger.info(f"⚔️ [ACTION] Attacking {target.get('name', 'enemy')}")
+                        logger.info(f"⚔️ Attacking {target.get('name', 'enemy')}")
                         self.action_in_progress = True
-                        self.consecutive_no_action = 0
+                        self.action_start_time = time.time()
                         self.actions_sent += 1
                         await self.websocket.send_action({
                             "type": "attack",
                             "targetId": target.get("id")
                         })
-                        logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                         return
                     elif distance < 5:
-                        logger.info(f"🚶 [ACTION] Moving to target at distance {distance:.1f}")
+                        logger.info(f"🚶 Moving to target")
                         self.action_in_progress = True
-                        self.consecutive_no_action = 0
+                        self.action_start_time = time.time()
                         self.actions_sent += 1
                         await self._move_towards((pos.get("x", 0), pos.get("y", 0)))
-                        logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                         return
             
             # ═══════════════════════════════════════════════════════════════════
@@ -446,63 +430,42 @@ class CompetitiveAI:
                     explored = nearest.get("explored", 0)
                     
                     if distance <= 2 and explored < 3:
-                        logger.info(f"🏛️ [ACTION] Exploring ruin ({explored}/3)")
+                        logger.info(f"🏛️ Exploring ruin ({explored}/3)")
                         self.action_in_progress = True
-                        self.consecutive_no_action = 0
+                        self.action_start_time = time.time()
                         self.actions_sent += 1
                         await self.websocket.send_action({
                             "type": "explore",
                             "ruinId": nearest.get("id")
                         })
-                        logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                         return
                     elif distance < 5:
-                        logger.info(f"🚶 [ACTION] Moving to ruin at distance {distance:.1f}")
+                        logger.info(f"🚶 Moving to ruin")
                         self.action_in_progress = True
-                        self.consecutive_no_action = 0
+                        self.action_start_time = time.time()
                         self.actions_sent += 1
                         await self._move_towards((pos.get("x", 0), pos.get("y", 0)))
-                        logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
                         return
             
             # ═══════════════════════════════════════════════════════════════════
-            # FALLBACK: FORCE MOVE
+            # FALLBACK: MOVE
             # ═══════════════════════════════════════════════════════════════════
             
             self.consecutive_no_action += 1
-            logger.warning(f"⚠️ [ACTION] No specific action - force move (count: {self.consecutive_no_action})")
+            logger.info(f"🚶 Moving random (count: {self.consecutive_no_action})")
             self.action_in_progress = True
+            self.action_start_time = time.time()
             self.actions_sent += 1
-            await self._force_action()
-            logger.info(f"   ✅ Action sent! (Total: {self.actions_sent})")
+            await self._force_move()
             
         except Exception as e:
-            logger.error(f"❌ [ERROR] Decision error: {e}")
+            logger.error(f"❌ Decision error: {e}")
             self.action_in_progress = False
-            await self._force_action()
+            self.action_start_time = 0
+            await self._force_move()
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # 4. FORCE ACTION - UNTUK BOT DIAM
-    # ═══════════════════════════════════════════════════════════════════════════
-    
-    async def _force_action(self):
-        """Force action - untuk mengatasi bot diam"""
-        # Coba ke arah yang berbeda
-        directions = ["up", "down", "left", "right"]
-        
-        if self._is_in_death_zone():
-            direction = self._get_safe_direction()
-        else:
-            direction = random.choice(directions)
-        
-        logger.info(f"🚀 [FORCE] Moving {direction}")
-        await self.websocket.send_action({
-            "type": "move",
-            "direction": direction
-        })
-    
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 5. HELPERS
+    # 4. HELPERS
     # ═══════════════════════════════════════════════════════════════════════════
     
     def _get_distance(self, pos1: Tuple[int, int], pos2: Tuple[int, int]) -> float:
@@ -601,6 +564,17 @@ class CompetitiveAI:
             direction = "right" if dx > 0 else "left"
         else:
             direction = "down" if dy > 0 else "up"
+        await self.websocket.send_action({
+            "type": "move",
+            "direction": direction
+        })
+    
+    async def _force_move(self):
+        directions = ["up", "down", "left", "right"]
+        if self._is_in_death_zone():
+            direction = self._get_safe_direction()
+        else:
+            direction = random.choice(directions)
         await self.websocket.send_action({
             "type": "move",
             "direction": direction
