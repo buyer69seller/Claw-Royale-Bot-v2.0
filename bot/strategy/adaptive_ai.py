@@ -1,156 +1,178 @@
 import random
 import math
-from typing import Dict, List, Optional, Tuple, Any
-from enum import Enum
+from typing import Dict, List, Optional, Tuple
 from ..game.websocket import GameWebSocket
 from ..utils.logger import logger
 
-class ActionType(Enum):
-    KILL = "kill"
-    LOOT = "loot"
-    HEAL = "heal"
-    EQUIP = "equip"
-    MOVE = "move"
-    INTERACT = "interact"
-    RETREAT = "retreat"
-    EXPLORE = "explore"
-    WAIT = "wait"
-
-class ActionScore:
-    """Scoring system untuk setiap aksi"""
-    
-    SCORE_KILL = 1000
-    SCORE_SURVIVAL = 600
-    SCORE_LOOT = 50
-    SCORE_POSITION = 100
-    SCORE_HEAL = 10
-    SCORE_RETREAT = 200
-    SCORE_EXPLORE = 150
-    SCORE_EQUIP = 300
-    
-    PENALTY_BAD_FIGHT = -1000
-    PENALTY_DEATH = -100000
-    PENALTY_WASTE_TURN = -50
-    
-    @staticmethod
-    def calculate_kill_score(target_hp: int, target_atk: int, 
-                            my_hp: int, my_atk: int, distance: int) -> float:
-        if target_hp <= 0:
-            return -1000
-        
-        damage_per_turn = max(1, my_atk - target_atk // 2)
-        turns_to_kill = max(1, target_hp // damage_per_turn)
-        enemy_damage = max(1, target_atk - my_atk // 2)
-        damage_taken = enemy_damage * turns_to_kill
-        survival_chance = max(0, 1 - (damage_taken / max(1, my_hp)))
-        distance_factor = max(0, 1 - (distance / 10))
-        
-        score = (ActionScore.SCORE_KILL * survival_chance * distance_factor) - (damage_taken * 10)
-        
-        if target_hp < 30:
-            score += 200
-        
-        if target_atk > my_atk * 1.5:
-            score += ActionScore.PENALTY_BAD_FIGHT
-            
-        return score
-    
-    @staticmethod
-    def calculate_loot_score(item_value: int, distance: int, threat_level: float) -> float:
-        if item_value <= 0:
-            return -100
-        
-        distance_factor = max(0, 1 - (distance / 5))
-        threat_penalty = threat_level * 200
-        score = (ActionScore.SCORE_LOOT + item_value) * distance_factor - threat_penalty
-        
-        if item_value > 100:
-            score += 100
-            
-        return score
-    
-    @staticmethod
-    def calculate_heal_score(hp_recovered: int, current_hp: int, 
-                            max_hp: int, threat_level: float) -> float:
-        if current_hp >= max_hp:
-            return -50
-        
-        hp_percent = current_hp / max_hp
-        urgency = 1 - hp_percent
-        score = ActionScore.SCORE_HEAL * hp_recovered * urgency
-        
-        if threat_level > 0.5 and hp_percent < 0.4:
-            score += 300
-            
-        return score
-    
-    @staticmethod
-    def calculate_position_score(position: Tuple[int, int], 
-                               death_zone_center: Tuple[int, int],
-                               death_zone_radius: int,
-                               enemy_positions: List[Tuple[int, int]]) -> float:
-        x, y = position
-        cx, cy = death_zone_center
-        distance_to_center = math.sqrt((x - cx)**2 + (y - cy)**2)
-        safety_score = max(0, 1 - (distance_to_center / max(1, death_zone_radius)))
-        
-        enemy_density = 0
-        for ex, ey in enemy_positions:
-            dist = math.sqrt((x - ex)**2 + (y - ey)**2)
-            if dist < 5:
-                enemy_density += 1 / max(1, dist)
-        
-        score = ActionScore.SCORE_POSITION * safety_score - (enemy_density * 50)
-        return score
-    
-    @staticmethod
-    def calculate_retreat_score(threat_level: float, current_hp: int, 
-                               max_hp: int, escape_chance: float) -> float:
-        if threat_level < 0.3:
-            return -50
-        
-        hp_percent = current_hp / max_hp
-        urgency = 1 - hp_percent
-        score = (ActionScore.SCORE_RETREAT * urgency * threat_level * escape_chance)
-        
-        if hp_percent < 0.2 and threat_level > 0.8:
-            score += 1000
-            
-        return score
-
-class AdaptiveAI:
-    """Adaptive Combat AI dengan Scoring System"""
+class CompetitiveAI:
+    """
+    BOT KOMPETITIF - Claw Royale
+    Continuous Loop: World Scanner → Threat Assessment → Decision Engine → Action Executor → Kembali ke World Scanner
+    """
     
     def __init__(self, websocket: GameWebSocket):
         self.websocket = websocket
+        
+        # ── State ──
         self.state = {}
         self.turn = 0
         self.is_dead = False
-        self.best_action = None
-        self.action_history = []
+        self.action_in_progress = False
+        
+        # ── Stats ──
         self.kills = 0
-        self.damage_dealt = 0
         self.items_collected = 0
         self.survival_time = 0
+        self.damage_dealt = 0
         
-        self.HP_CRITICAL = 0.20
+        # ── Self ──
+        self.my_position = (0, 0)
+        self.my_hp = 100
+        self.my_max_hp = 100
+        self.my_ep = 50
+        self.my_max_ep = 50
+        self.my_atk = 5
+        self.my_def = 2
+        self.in_cave = False
+        self.cave_id = None
+        self.alert_gauge = 0
+        
+        # ── World ──
+        self.visible_agents = []
+        self.visible_monsters = []
+        self.visible_items = []
+        self.visible_ruins = []
+        self.death_zone_center = (10, 10)
+        self.death_zone_radius = 10
+        self.enemy_positions = []
+        
+        # ── Thresholds ──
+        self.HP_CRITICAL = 0.25
         self.HP_LOW = 0.40
-        self.HP_SAFE = 0.70
+        self.HP_SAFE = 0.60
         
-        self.weights = {
-            "survival": 1.0,
-            "aggression": 0.7,
-            "greed": 0.5,
-            "positioning": 0.8
+        self.LOOT_RANGE = 3
+        self.ATTACK_RANGE = 3
+        self.SAFE_ZONE_BUFFER = 2
+        self.ALERT_THRESHOLD = 7
+        
+        # ── Item Values ──
+        self.ITEM_VALUES = {
+            "relic": 100,
+            "pack": 80,
+            "potion": 50,
+            "herb": 30,
+            "smoltz": 10,
+            "default": 20
         }
         
+        # ── Continuous Loop Control ──
+        self.loop_iteration = 0
+        self.last_action_time = 0
+        
     async def handle_message(self, data: Dict):
+        """
+        ┌─────────────────────────────────────────────────────────────────────────────────┐
+        │                         CONTINUOUS LOOP                                        │
+        │                                                                                 │
+        │  ┌───────────────────────────────────────────────────────────────────────────┐  │
+        │  │  1. WORLD SCANNER ←─────────────────────────────────────────────────┐     │  │
+        │  │     ↓                                                               │     │  │
+        │  │  2. THREAT ASSESSMENT                                               │     │  │
+        │  │     ↓                                                               │     │  │
+        │  │  3. DECISION ENGINE (PRIORITY BASED)                                │     │  │
+        │  │     ↓                                                               │     │  │
+        │  │  4. ACTION EXECUTOR                                                 │     │  │
+        │  │     ↓                                                               │     │  │
+        │  │  5. WAIT FOR ACTION RESULT                                          │     │  │
+        │  │     ↓                                                               │     │  │
+        │  │  6. UPDATE STATE ───────────────────────────────────────────────────┘     │  │
+        │  └───────────────────────────────────────────────────────────────────────────┘  │
+        │                                                                                 │
+        └─────────────────────────────────────────────────────────────────────────────────┘
+        """
         msg_type = data.get("type")
         
-        if msg_type == "agent_died":
+        # ──────────────────────────────────────────────
+        # 1. WORLD SCANNER - Update semua informasi
+        # ──────────────────────────────────────────────
+        if msg_type == "agent_view":
+            self.state = data.get("view", {})
+            self.turn += 1
+            self.survival_time = self.turn
+            self._update_world_state()
+            
+            # ── 2. THREAT ASSESSMENT ──
+            threats = self._assess_threats()
+            
+            # ── 3. DECISION ENGINE ──
+            if data.get("canAct", True) and not self.is_dead:
+                await self._decide_action(threats)
+            
+            # ── 4. CONTINUOUS LOOP ──
+            # Setelah action, loop kembali ke World Scanner (via agent_view berikutnya)
+            self.loop_iteration += 1
+            if self.loop_iteration % 10 == 0:
+                logger.debug(f"🔄 Continuous Loop: {self.loop_iteration} iterations completed")
+        
+        elif msg_type == "turn_advanced":
+            self.turn += 1
+            self.survival_time = self.turn
+            if self.state.get("canAct", True) and not self.is_dead:
+                threats = self._assess_threats()
+                await self._decide_action(threats)
+        
+        # ──────────────────────────────────────────────
+        # 5. ACTION RESULT - Update state setelah action
+        # ──────────────────────────────────────────────
+        elif msg_type == "action_result":
+            result = data.get("result", {})
+            if result.get("success"):
+                logger.debug("✅ Action successful")
+                self.action_in_progress = False
+            else:
+                error = result.get("error", {})
+                error_code = error.get("code", "")
+                
+                if error_code == "AGENT_DEAD":
+                    logger.info(f"💀 YOU DIED! (via action_result)")
+                    self.is_dead = True
+                    self.websocket.is_alive = False
+                    if self.websocket.on_game_ended:
+                        self.websocket.on_game_ended()
+                    return
+                
+                elif error_code == "TARGET_DEAD":
+                    logger.debug("🎯 Target dead, refreshing...")
+                    self.visible_agents = []
+                    self.action_in_progress = False
+                    # 🔄 Kembali ke World Scanner
+                    if self.state.get("canAct", True):
+                        threats = self._assess_threats()
+                        await self._decide_action(threats)
+                    return
+                
+                elif error_code == "ACTION_FAILED":
+                    logger.debug(f"❌ Action failed: {error.get('message')}")
+                    self.action_in_progress = False
+                    # 🔄 Kembali ke World Scanner
+                    if self.state.get("canAct", True):
+                        threats = self._assess_threats()
+                        await self._decide_action(threats)
+                    return
+                
+                elif error_code == "NOT_ENOUGH_EP":
+                    logger.debug("⚡ Not enough EP, waiting...")
+                    self.action_in_progress = False
+                    return
+        
+        # ──────────────────────────────────────────────
+        # 6. DEATH DETECTION
+        # ──────────────────────────────────────────────
+        elif msg_type == "agent_died":
             meta = data.get("meta", {})
             if meta.get("youDied") == True:
-                logger.info(f"💀 YOU DIED! Survival time: {self.survival_time}, Kills: {self.kills}")
+                logger.info(f"💀 YOU DIED! Survival: {self.survival_time}, Kills: {self.kills}, Loot: {self.items_collected}")
                 self.is_dead = True
                 self.websocket.is_alive = False
                 if self.websocket.on_game_ended:
@@ -158,353 +180,416 @@ class AdaptiveAI:
                 return
             else:
                 logger.debug(f"💀 Agent died: {data.get('agentId')}")
-                return
-        
-        if msg_type == "action_result":
-            result = data.get("result", {})
-            if not result.get("success"):
-                error = result.get("error", {})
-                if error.get("code") == "AGENT_DEAD":
-                    logger.info(f"💀 YOU DIED! (via action_result)")
-                    self.is_dead = True
-                    self.websocket.is_alive = False
-                    if self.websocket.on_game_ended:
-                        self.websocket.on_game_ended()
-                    return
-        
-        if msg_type == "agent_view":
-            self.state = data.get("view", {})
-            self.turn += 1
-            self.survival_time = self.turn
-            
-            if data.get("canAct", True):
-                await self._analyze_and_decide()
-        
-        elif msg_type == "turn_advanced":
-            self.turn += 1
-            self.survival_time = self.turn
-            if self.state.get("canAct", True):
-                await self._analyze_and_decide()
+                self.visible_agents = []
+                # 🔄 Kembali ke World Scanner
+                if self.state.get("canAct", True) and not self.is_dead:
+                    threats = self._assess_threats()
+                    await self._decide_action(threats)
     
-    async def _analyze_and_decide(self):
-        try:
-            world = self._analyze_world()
-            threats = self._assess_threats(world)
-            actions = self._score_actions(world, threats)
-            
-            if actions:
-                best = max(actions, key=lambda x: x['score'])
-                self.best_action = best
-                
-                if self.turn % 5 == 0:
-                    logger.info(f"🎯 Turn {self.turn}: Best action = {best['action'].value} (score: {best['score']:.1f})")
-                
-                await self._execute_action(best)
-            else:
-                logger.warning("⚠️ No actions scored, moving randomly")
-                await self._move_random()
-                
-        except Exception as e:
-            logger.error(f"❌ AI error: {e}")
-            await self._move_random()
+    def _update_world_state(self):
+        """1. WORLD SCANNER - Update semua informasi dunia"""
+        view = self.state
+        self_section = view.get("self", {})
+        
+        # ── Self Scan ──
+        self.my_position = (
+            self_section.get("position", {}).get("x", 0),
+            self_section.get("position", {}).get("y", 0)
+        )
+        self.my_hp = self_section.get("hp", 100)
+        self.my_max_hp = self_section.get("maxHp", 100)
+        self.my_ep = self_section.get("ep", 50)
+        self.my_max_ep = self_section.get("maxEp", 50)
+        self.in_cave = self_section.get("inCave", False)
+        self.cave_id = self_section.get("caveId")
+        self.alert_gauge = self_section.get("alertGauge", 0)
+        self.my_atk = self_section.get("atk", 5)
+        self.my_def = self_section.get("def", 2)
+        
+        # ── Enemy Scan ──
+        self.visible_agents = view.get("visibleAgents", [])
+        self.visible_monsters = view.get("visibleMonsters", [])
+        
+        # ── Item Scan ──
+        self.visible_items = view.get("visibleItems", [])
+        
+        # ── Map Scan ──
+        self.visible_ruins = view.get("visibleRuins", [])
+        
+        # ── Enemy Positions ──
+        self.enemy_positions = []
+        for agent in self.visible_agents:
+            pos = agent.get("position", {})
+            self.enemy_positions.append((pos.get("x", 0), pos.get("y", 0)))
+        for monster in self.visible_monsters:
+            pos = monster.get("position", {})
+            self.enemy_positions.append((pos.get("x", 0), pos.get("y", 0)))
+        
+        # ── Death Zone ──
+        dz = view.get("deathZone", {})
+        self.death_zone_center = (
+            dz.get("center", {}).get("x", 10),
+            dz.get("center", {}).get("y", 10)
+        )
+        self.death_zone_radius = dz.get("radius", 10)
+        
+        # ── Log ──
+        if self.turn % 5 == 0:
+            hp_percent = int((self.my_hp / self.my_max_hp) * 100)
+            logger.info(f"📊 T{self.turn}: HP={hp_percent}%, EP={self.my_ep}/{self.my_max_ep}, "
+                       f"Pos=({self.my_position[0]},{self.my_position[1]}), "
+                       f"Enemies={len(self.visible_agents)}, Items={len(self.visible_items)}, "
+                       f"Kills={self.kills}")
     
-    def _analyze_world(self) -> Dict:
-        self_section = self.state.get("self", {})
-        
-        world = {
-            "self": {
-                "id": self_section.get("id"),
-                "hp": self_section.get("hp", 100),
-                "max_hp": self_section.get("maxHp", 100),
-                "ep": self_section.get("ep", 50),
-                "max_ep": self_section.get("maxEp", 50),
-                "position": self_section.get("position", {"x": 0, "y": 0}),
-                "in_cave": self_section.get("inCave", False),
-                "alert": self_section.get("alertGauge", 0),
-                "items": self_section.get("items", [])
-            },
-            "enemies": {
-                "agents": self.state.get("visibleAgents", []),
-                "monsters": self.state.get("visibleMonsters", [])
-            },
-            "items": self.state.get("visibleItems", []),
-            "ruins": self.state.get("visibleRuins", []),
-            "death_zone": self.state.get("deathZone", {"center": {"x": 10, "y": 10}, "radius": 10})
-        }
-        
-        if self.turn % 10 == 0:
-            hp = world["self"]["hp"]
-            max_hp = world["self"]["max_hp"]
-            enemies = len(world["enemies"]["agents"]) + len(world["enemies"]["monsters"])
-            items = len(world["items"])
-            logger.info(f"📊 Turn {self.turn}: HP={hp}/{max_hp}, Enemies={enemies}, Items={items}")
-        
-        return world
-    
-    def _assess_threats(self, world: Dict) -> Dict:
+    def _assess_threats(self) -> Dict:
+        """2. THREAT ASSESSMENT - Analisis ancaman dan peluang"""
         threats = {
             "overall_threat": 0,
             "kill_chance": 0,
             "damage_received": 0,
             "escape_chance": 1.0,
-            "targets": []
+            "best_target": None,
+            "zone_threat": 0,
+            "enemy_density": len(self.visible_agents) + len(self.visible_monsters)
         }
         
-        self_section = world["self"]
-        my_hp = self_section["hp"]
-        my_atk = 5
-        my_def = 2
+        # ── Zone Threat ──
+        distance_to_center = self._get_distance(self.my_position, self.death_zone_center)
+        threats["zone_threat"] = distance_to_center / max(1, self.death_zone_radius)
         
-        all_enemies = world["enemies"]["agents"] + world["enemies"]["monsters"]
+        # ── Enemy Threat ──
+        all_enemies = self.visible_agents + self.visible_monsters
+        if all_enemies:
+            total_threat = 0
+            best_target = None
+            best_score = -1
+            
+            for enemy in all_enemies:
+                pos = enemy.get("position", {})
+                distance = self._get_distance(
+                    self.my_position,
+                    (pos.get("x", 0), pos.get("y", 0))
+                )
+                
+                enemy_hp = enemy.get("hp", 100)
+                enemy_atk = enemy.get("atk", 5)
+                enemy_def = enemy.get("def", 2)
+                
+                # Kill probability
+                damage_per_turn = max(1, self.my_atk - enemy_def // 2)
+                turns_to_kill = max(1, enemy_hp // damage_per_turn)
+                enemy_damage = max(1, enemy_atk - self.my_def // 2)
+                damage_received = enemy_damage * turns_to_kill
+                
+                # Threat level
+                threat_level = (enemy_atk / max(1, self.my_atk)) * (1 / max(1, distance))
+                total_threat += threat_level
+                
+                # Best target score
+                kill_score = (100 - enemy_hp) / 100
+                distance_score = 1 / (1 + distance)
+                risk_score = 1 - (damage_received / max(1, self.my_hp))
+                score = kill_score * 0.5 + distance_score * 0.3 + risk_score * 0.2
+                
+                if score > best_score:
+                    best_score = score
+                    best_target = enemy
+            
+            threats["overall_threat"] = total_threat
+            threats["best_target"] = best_target
+            threats["kill_chance"] = best_score if best_score > 0 else 0
         
-        for enemy in all_enemies:
-            enemy_hp = enemy.get("hp", 100)
-            enemy_atk = enemy.get("atk", 5)
-            enemy_def = enemy.get("def", 2)
-            distance = enemy.get("distance", 10)
-            
-            damage_per_turn = max(1, my_atk - enemy_def // 2)
-            turns_to_kill = max(1, enemy_hp // damage_per_turn)
-            enemy_damage = max(1, enemy_atk - my_def // 2)
-            damage_received = enemy_damage * turns_to_kill
-            threat_level = (enemy_atk / max(1, my_atk)) * (1 / max(1, distance))
-            
-            threats["targets"].append({
-                "id": enemy.get("id"),
-                "hp": enemy_hp,
-                "atk": enemy_atk,
-                "def": enemy_def,
-                "distance": distance,
-                "threat_level": threat_level,
-                "kill_probability": max(0, 1 - (damage_received / max(1, my_hp))),
-                "turns_to_kill": turns_to_kill,
-                "damage_received": damage_received
-            })
-            
-            threats["damage_received"] += damage_received / max(1, len(all_enemies))
-            threats["overall_threat"] += threat_level
-        
-        hp_percent = my_hp / world["self"]["max_hp"]
+        # ── Escape Chance ──
         threats["escape_chance"] = max(0, 1 - threats["overall_threat"] / 10)
-        
-        pos = self_section["position"]
-        dz = world["death_zone"]
-        cx, cy = dz["center"]["x"], dz["center"]["y"]
-        radius = dz["radius"]
-        dx = pos["x"] - cx
-        dy = pos["y"] - cy
-        distance_to_center = math.sqrt(dx*dx + dy*dy)
-        
-        if distance_to_center > radius * 0.8:
-            threats["overall_threat"] += 2
-        
-        if threats["targets"]:
-            threats["kill_chance"] = max(t["kill_probability"] for t in threats["targets"])
         
         return threats
     
-    def _score_actions(self, world: Dict, threats: Dict) -> List[Dict]:
-        actions = []
-        self_section = world["self"]
-        
-        # 1. KILL
-        for target in threats["targets"]:
-            if target["distance"] <= 3:
-                score = ActionScore.calculate_kill_score(
-                    target_hp=target["hp"],
-                    target_atk=target["atk"],
-                    my_hp=self_section["hp"],
-                    my_atk=5,
-                    distance=target["distance"]
-                )
-                score *= self.weights["aggression"]
-                actions.append({
-                    "action": ActionType.KILL,
-                    "target_id": target["id"],
-                    "score": score,
-                    "details": f"Kill {target['id'][:8]} (HP: {target['hp']})"
-                })
-        
-        # 2. LOOT
-        for item in world["items"]:
-            distance = item.get("distance", 10)
-            item_value = item.get("value", 10)
-            score = ActionScore.calculate_loot_score(
-                item_value=item_value,
-                distance=distance,
-                threat_level=threats["overall_threat"]
-            )
-            score *= self.weights["greed"]
-            actions.append({
-                "action": ActionType.LOOT,
-                "target_id": item.get("id"),
-                "score": score,
-                "details": f"Loot {item.get('name', 'item')} (value: {item_value})"
-            })
-        
-        # 3. HEAL
-        hp_percent = self_section["hp"] / self_section["max_hp"]
-        if hp_percent < 0.8:
-            for item in self_section["items"]:
-                item_type = item.get("type", "")
-                if "heal" in item_type.lower() or "potion" in item_type.lower():
-                    hp_recovered = item.get("value", 20)
-                    score = ActionScore.calculate_heal_score(
-                        hp_recovered=hp_recovered,
-                        current_hp=self_section["hp"],
-                        max_hp=self_section["max_hp"],
-                        threat_level=threats["overall_threat"]
-                    )
-                    actions.append({
-                        "action": ActionType.HEAL,
-                        "target_id": item.get("id"),
-                        "score": score,
-                        "details": f"Heal +{hp_recovered} HP"
-                    })
-        
-        # 4. RETREAT
-        if hp_percent < self.HP_LOW or threats["overall_threat"] > 5:
-            score = ActionScore.calculate_retreat_score(
-                threat_level=threats["overall_threat"],
-                current_hp=self_section["hp"],
-                max_hp=self_section["max_hp"],
-                escape_chance=threats["escape_chance"]
-            )
-            
-            pos = self_section["position"]
-            dz = world["death_zone"]
-            cx, cy = dz["center"]["x"], dz["center"]["y"]
-            dx = cx - pos["x"]
-            dy = cy - pos["y"]
-            
-            if abs(dx) > abs(dy):
-                direction = "right" if dx > 0 else "left"
-            else:
-                direction = "down" if dy > 0 else "up"
-            
-            actions.append({
-                "action": ActionType.RETREAT,
-                "direction": direction,
-                "score": score,
-                "details": f"Retreat {direction} (threat: {threats['overall_threat']:.1f})"
-            })
-        
-        # 5. EXPLORE
-        for ruin in world["ruins"]:
-            distance = ruin.get("distance", 10)
-            explored = ruin.get("explored", 0)
-            if distance <= 2 and explored < 3:
-                score = ActionScore.SCORE_EXPLORE * (3 - explored) / 3
-                score -= threats["overall_threat"] * 20
-                actions.append({
-                    "action": ActionType.EXPLORE,
-                    "target_id": ruin.get("id"),
-                    "score": score,
-                    "details": f"Explore ruin ({explored}/3)"
-                })
-        
-        # 6. POSITION (MOVE)
-        pos = self_section["position"]
-        dz = world["death_zone"]
-        cx, cy = dz["center"]["x"], dz["center"]["y"]
-        radius = dz["radius"]
-        
-        enemy_positions = [
-            (e.get("position", {}).get("x", 0), e.get("position", {}).get("y", 0))
-            for e in world["enemies"]["agents"] + world["enemies"]["monsters"]
-        ]
-        
-        position_score = ActionScore.calculate_position_score(
-            position=(pos["x"], pos["y"]),
-            death_zone_center=(cx, cy),
-            death_zone_radius=radius,
-            enemy_positions=enemy_positions
-        )
-        
-        if position_score < 50:
-            dx = cx - pos["x"]
-            dy = cy - pos["y"]
-            if abs(dx) > abs(dy):
-                direction = "right" if dx > 0 else "left"
-            else:
-                direction = "down" if dy > 0 else "up"
-            
-            score = position_score * self.weights["positioning"]
-            actions.append({
-                "action": ActionType.MOVE,
-                "direction": direction,
-                "score": score,
-                "details": f"Move {direction} (position: {position_score:.1f})"
-            })
-        
-        # 7. FALLBACK: Random move
-        if not actions:
-            directions = ["up", "down", "left", "right"]
-            for direction in directions:
-                actions.append({
-                    "action": ActionType.MOVE,
-                    "direction": direction,
-                    "score": -10,
-                    "details": f"Random move {direction}"
-                })
-        
-        actions.sort(key=lambda x: x["score"], reverse=True)
-        return actions
+    def _get_distance(self, pos1: Tuple[int, int], pos2: Tuple[int, int]) -> float:
+        return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
     
-    async def _execute_action(self, action: Dict):
-        action_type = action["action"]
+    def _get_nearest_entity(self, entities: List, position_key: str = "position") -> Optional[Dict]:
+        if not entities:
+            return None
         
-        if action_type == ActionType.KILL:
-            await self.websocket.send_action({
-                "type": "attack",
-                "targetId": action["target_id"]
-            })
-            self.kills += 1
-            logger.info(f"⚔️ Attacking target (kill #{self.kills})")
+        def get_distance(entity):
+            pos = entity.get(position_key, {})
+            return self._get_distance(
+                self.my_position,
+                (pos.get("x", 0), pos.get("y", 0))
+            )
+        
+        return min(entities, key=get_distance)
+    
+    def _is_in_death_zone(self) -> bool:
+        distance = self._get_distance(self.my_position, self.death_zone_center)
+        return distance > self.death_zone_radius - self.SAFE_ZONE_BUFFER
+    
+    def _get_safe_direction(self) -> str:
+        x, y = self.my_position
+        cx, cy = self.death_zone_center
+        
+        dx = cx - x
+        dy = cy - y
+        
+        if abs(dx) > abs(dy):
+            return "right" if dx > 0 else "left"
+        else:
+            return "down" if dy > 0 else "up"
+    
+    def _get_item_value(self, item: Dict) -> int:
+        item_type = item.get("type", "default").lower()
+        return self.ITEM_VALUES.get(item_type, self.ITEM_VALUES["default"])
+    
+    async def _decide_action(self, threats: Dict):
+        """
+        3. DECISION ENGINE - Priority Based
+        4. ACTION EXECUTOR - Execute selected action
+        """
+        try:
+            if self.is_dead or self.action_in_progress:
+                return
             
-        elif action_type == ActionType.LOOT:
-            await self.websocket.send_action({
-                "type": "collect",
-                "itemId": action["target_id"]
-            })
-            self.items_collected += 1
-            logger.info(f"📦 Collecting item #{self.items_collected}")
+            hp_percent = self.my_hp / self.my_max_hp
             
-        elif action_type == ActionType.HEAL:
-            await self.websocket.send_action({
-                "type": "use_item",
-                "itemId": action["target_id"]
-            })
-            logger.info(f"💊 Healing")
+            # ──────────────────────────────────────────────
+            # PRIORITY 1: SURVIVAL
+            # ──────────────────────────────────────────────
             
-        elif action_type == ActionType.INTERACT:
-            await self.websocket.send_action({
-                "type": "interact",
-                "interactableId": action["target_id"]
-            })
-            logger.info(f"🤝 Interacting")
+            # 1a. Escape cave
+            if self.in_cave and self.cave_id:
+                logger.info("🚪 Escaping cave...")
+                self.action_in_progress = True
+                await self.websocket.send_action({
+                    "type": "interact",
+                    "interactableId": self.cave_id
+                })
+                return
             
-        elif action_type == ActionType.EXPLORE:
-            await self.websocket.send_action({
-                "type": "explore",
-                "ruinId": action["target_id"]
-            })
-            logger.info(f"🏛️ Exploring ruin")
+            # 1b. Heal if HP critical
+            if hp_percent < self.HP_CRITICAL:
+                logger.warning(f"⚠️ CRITICAL HP: {self.my_hp}/{self.my_max_hp}")
+                
+                self_section = self.state.get("self", {})
+                items = self_section.get("items", [])
+                
+                healing_items = []
+                for item in items:
+                    item_type = item.get("type", "").lower()
+                    if "heal" in item_type or "potion" in item_type or "herb" in item_type:
+                        healing_items.append(item)
+                
+                if healing_items:
+                    healing_items.sort(key=lambda x: x.get("value", 0), reverse=True)
+                    best_item = healing_items[0]
+                    logger.info(f"💊 Using: {best_item.get('name', 'heal')}")
+                    self.action_in_progress = True
+                    await self.websocket.send_action({
+                        "type": "use_item",
+                        "itemId": best_item.get("id")
+                    })
+                    return
+                
+                logger.warning("🏃 No healing - retreating!")
+                self.action_in_progress = True
+                await self._move_away_from_enemies()
+                return
             
-        elif action_type == ActionType.RETREAT or action_type == ActionType.MOVE:
-            direction = action.get("direction", "up")
+            # 1c. Retreat if HP low and enemies nearby
+            if hp_percent < self.HP_LOW and self.visible_agents:
+                logger.warning(f"⚠️ LOW HP: {self.my_hp}/{self.my_max_hp} - retreating!")
+                self.action_in_progress = True
+                await self._move_away_from_enemies()
+                return
+            
+            # 1d. Move to safe zone if in death zone
+            if self._is_in_death_zone():
+                direction = self._get_safe_direction()
+                logger.info(f"🏃 Moving to safe zone: {direction}")
+                self.action_in_progress = True
+                await self.websocket.send_action({
+                    "type": "move",
+                    "direction": direction
+                })
+                return
+            
+            # 1e. Hide if alert too high
+            if self.alert_gauge > self.ALERT_THRESHOLD:
+                logger.info(f"⚠️ Alert too high ({self.alert_gauge}) - hiding!")
+                self.action_in_progress = True
+                await self._move_away_from_enemies()
+                return
+            
+            # ──────────────────────────────────────────────
+            # PRIORITY 2: LOOT
+            # ──────────────────────────────────────────────
+            
+            if self.visible_items:
+                sorted_items = sorted(
+                    self.visible_items,
+                    key=lambda x: self._get_item_value(x),
+                    reverse=True
+                )
+                
+                for item in sorted_items:
+                    pos = item.get("position", {})
+                    distance = self._get_distance(
+                        self.my_position,
+                        (pos.get("x", 0), pos.get("y", 0))
+                    )
+                    
+                    if distance <= self.LOOT_RANGE:
+                        logger.info(f"📦 Looting: {item.get('name', 'item')} (value: {self._get_item_value(item)})")
+                        self.action_in_progress = True
+                        await self.websocket.send_action({
+                            "type": "collect",
+                            "itemId": item.get("id")
+                        })
+                        self.items_collected += 1
+                        return
+                    
+                    elif distance < 5:
+                        logger.info(f"🚶 Moving to item at distance {distance:.1f}")
+                        self.action_in_progress = True
+                        await self._move_towards((pos.get("x", 0), pos.get("y", 0)))
+                        return
+            
+            # ──────────────────────────────────────────────
+            # PRIORITY 3: KILL
+            # ──────────────────────────────────────────────
+            
+            if hp_percent > self.HP_SAFE and threats.get("best_target"):
+                target = threats.get("best_target")
+                if target:
+                    target_hp = target.get("hp", 100)
+                    target_name = target.get("name", "enemy")
+                    distance = self._get_distance(
+                        self.my_position,
+                        (target.get("position", {}).get("x", 0), target.get("position", {}).get("y", 0))
+                    )
+                    
+                    if distance <= self.ATTACK_RANGE:
+                        logger.info(f"⚔️ Attacking {target_name} (HP: {target_hp})")
+                        self.action_in_progress = True
+                        await self.websocket.send_action({
+                            "type": "attack",
+                            "targetId": target.get("id")
+                        })
+                        return
+                    else:
+                        # Move closer to target
+                        logger.info(f"🚶 Moving to target at distance {distance:.1f}")
+                        self.action_in_progress = True
+                        await self._move_towards(
+                            (target.get("position", {}).get("x", 0), 
+                             target.get("position", {}).get("y", 0))
+                        )
+                        return
+            
+            # ──────────────────────────────────────────────
+            # PRIORITY 4: EXPLORE
+            # ──────────────────────────────────────────────
+            
+            if self.visible_ruins:
+                nearest_ruin = self._get_nearest_entity(self.visible_ruins)
+                if nearest_ruin:
+                    pos = nearest_ruin.get("position", {})
+                    distance = self._get_distance(
+                        self.my_position,
+                        (pos.get("x", 0), pos.get("y", 0))
+                    )
+                    explored = nearest_ruin.get("explored", 0)
+                    
+                    if distance <= 2 and explored < 3:
+                        logger.info(f"🏛️ Exploring ruin ({explored}/3)")
+                        self.action_in_progress = True
+                        await self.websocket.send_action({
+                            "type": "explore",
+                            "ruinId": nearest_ruin.get("id")
+                        })
+                        return
+                    
+                    elif distance < 5:
+                        logger.info(f"🚶 Moving to ruin at distance {distance:.1f}")
+                        self.action_in_progress = True
+                        await self._move_towards((pos.get("x", 0), pos.get("y", 0)))
+                        return
+            
+            # ──────────────────────────────────────────────
+            # PRIORITY 5: MOVE
+            # ──────────────────────────────────────────────
+            
+            self.action_in_progress = True
+            if self._is_in_death_zone():
+                direction = self._get_safe_direction()
+                await self.websocket.send_action({
+                    "type": "move",
+                    "direction": direction
+                })
+            else:
+                await self._move_random()
+            
+        except Exception as e:
+            logger.error(f"❌ Decision error: {e}")
+            self.action_in_progress = False
+            await self._move_random()
+    
+    # ──────────────────────────────────────────────
+    # MOVEMENT HELPERS
+    # ──────────────────────────────────────────────
+    
+    async def _move_towards(self, target_pos: Tuple[int, int]):
+        x, y = self.my_position
+        tx, ty = target_pos
+        
+        dx = tx - x
+        dy = ty - y
+        
+        if abs(dx) > abs(dy):
+            direction = "right" if dx > 0 else "left"
+        else:
+            direction = "down" if dy > 0 else "up"
+        
+        await self.websocket.send_action({
+            "type": "move",
+            "direction": direction
+        })
+    
+    async def _move_away_from_enemies(self):
+        if not self.enemy_positions:
+            await self._move_random()
+            return
+        
+        nearest = None
+        nearest_dist = 999
+        for pos in self.enemy_positions:
+            dist = self._get_distance(self.my_position, pos)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = pos
+        
+        if nearest:
+            x, y = self.my_position
+            ex, ey = nearest
+            
+            dx = x - ex
+            dy = y - ey
+            
+            if abs(dx) > abs(dy):
+                direction = "right" if dx > 0 else "left"
+            else:
+                direction = "down" if dy > 0 else "up"
+            
             await self.websocket.send_action({
                 "type": "move",
                 "direction": direction
             })
-            logger.debug(f"🚶 {action['details']}")
-            
         else:
-            logger.warning(f"⚠️ Unknown action: {action_type}")
+            await self._move_random()
     
     async def _move_random(self):
         directions = ["up", "down", "left", "right"]
         direction = random.choice(directions)
+        logger.debug(f"🚶 Moving {direction} (random)")
         await self.websocket.send_action({
             "type": "move",
             "direction": direction
