@@ -345,3 +345,17 @@ class GameWebSocket:
             except Exception as e:
                 logger.warning(f"Error closing WebSocket: {e}")
             self.websocket = None
+# Tambahkan di bagian receive_loop, setelah except Exception:
+except websockets.ConnectionClosedError as e:
+    logger.warning(f"⚠️ Connection closed: {e}")
+    if self.reconnect_attempts < self.max_reconnect_attempts:
+        wait = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
+        self.reconnect_attempts += 1
+        logger.info(f"🔄 Reconnecting in {wait}s...")
+        await asyncio.sleep(wait)
+        await self._reconnect()
+    else:
+        logger.error("❌ Max reconnection attempts reached")
+        if self.on_game_ended:
+            self.on_game_ended()
+        break
