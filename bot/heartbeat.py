@@ -4,7 +4,7 @@ from .state.router import StateRouter, AgentState
 from .api.client import APIClient
 from .game.websocket import GameWebSocket
 from .strategy.loadout import LoadoutManager
-from .strategy.adaptive_ai import AdaptiveAI
+from .strategy.competitive_ai import CompetitiveAI  # ← Ganti dari AdaptiveAI
 from .utils.logger import logger
 from .config import Config
 
@@ -36,7 +36,7 @@ class Heartbeat:
     async def run(self):
         logger.info(f"Starting Claw Royale Bot: {Config.AGENT_NAME}")
         logger.info("=" * 50)
-        logger.info("🦞 CLAW ROYALE BOT - AUTO-PILOT ENABLED")
+        logger.info("🦞 CLAW ROYALE BOT - COMPETITIVE AI ENABLED")
         logger.info("=" * 50)
         
         if self.client._has_api_key():
@@ -87,21 +87,20 @@ class Heartbeat:
                         self.join_attempts = 0
                         self.idle_refresh_count = 0
                         
-                        # 🔥 LANGSUNG FORCE JOIN, tanpa menunggu readiness
                         await self._force_join_free()
                         self.force_join_attempted = True
                         continue
                     
                     free_ready = self.client.account_data.get("readiness", {}).get("freeReady") if self.client.account_data else None
                     if free_ready is None or free_ready == False:
-                        logger.info("🔧 freeReady not available - starting auto-pilot...")
+                        logger.info("🔧 freeReady not available - starting competitive AI...")
                         await self._force_join_free()
                         self.force_join_attempted = True
                         continue
                 
                 # 🔥 IDLE CHECK - jika terlalu lama idle, force join
                 if self.idle_refresh_count >= self.max_idle_refresh:
-                    logger.info("🔧 Idle too long - forcing auto-pilot...")
+                    logger.info("🔧 Idle too long - forcing competitive AI...")
                     await self._force_refresh_state()
                     await self._force_join_free()
                     self.idle_refresh_count = 0
@@ -124,17 +123,15 @@ class Heartbeat:
                     logger.info("🎮 Starting new paid game...")
                     await self._handle_start_game("paid")
                 elif state == AgentState.IDLE:
-                    logger.info("😴 Idle - forcing auto-pilot...")
+                    logger.info("😴 Idle - forcing competitive AI...")
                     self.idle_refresh_count += 1
                     
-                    # 🔥 LANGSUNG FORCE JOIN, jangan menunggu
                     if self.reconnect_attempts > 2:
                         logger.info("🔧 Too many idle attempts - force joining...")
                         await self._force_join_free()
                         self.reconnect_attempts = 0
                         self.idle_refresh_count = 0
                     else:
-                        # Tunggu sebentar lalu force join
                         await asyncio.sleep(3)
                         await self._force_join_free()
                         self.idle_refresh_count = 0
@@ -195,7 +192,7 @@ class Heartbeat:
                 paid_ready = readiness.get("paidReady", False)
                 
                 if free_ready is None:
-                    logger.warning(f"   ⚠️ freeReady: None - auto-pilot will force join")
+                    logger.warning(f"   ⚠️ freeReady: None - competitive AI will force join")
                 else:
                     logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
                 
@@ -212,7 +209,7 @@ class Heartbeat:
                 self.login_attempted = True
                 
                 if free_ready is None and not self.force_join_attempted:
-                    logger.info("🔧 freeReady is None - auto-pilot will force join...")
+                    logger.info("🔧 freeReady is None - competitive AI will force join...")
             else:
                 logger.error("❌ Login failed - check API_KEY")
                 self.login_attempted = True
@@ -242,7 +239,7 @@ class Heartbeat:
             logger.info(f"   Readiness: freeReady={free_ready}, paidReady={paid_ready}")
             
             if free_ready is None or free_ready == False:
-                logger.info("   🔧 freeReady not available - starting auto-pilot...")
+                logger.info("   🔧 freeReady not available - starting competitive AI...")
                 await self._force_join_free()
                 self.force_join_attempted = True
                 
@@ -250,8 +247,8 @@ class Heartbeat:
             logger.error(f"❌ Auto-setup error: {e}")
     
     async def _force_join_free(self):
-        """🔥 AUTO-PILOT: Force join dan langsung mulai bermain"""
-        logger.info("🚀 Auto-pilot: Force joining game...")
+        """🔥 COMPETITIVE AI: Force join dan mulai bermain"""
+        logger.info("🚀 Competitive AI: Force joining game...")
         
         self.force_join_attempted = True
         self.waiting_for_next_game = False
@@ -259,7 +256,6 @@ class Heartbeat:
         max_force_attempts = 3
         for attempt in range(max_force_attempts):
             try:
-                # 1. Connect WebSocket
                 self.websocket = GameWebSocket()
                 connected = await self.websocket.connect("free")
                 
@@ -275,15 +271,13 @@ class Heartbeat:
                 self.idle_refresh_count = 0
                 self.reconnect_attempts = 0
                 
-                # 2. 🔥 START AUTO-PILOT
-                logger.info("🤖 Auto-pilot: Starting Adaptive AI...")
-                self.strategy = AdaptiveAI(self.websocket)
+                # 🔥 START COMPETITIVE AI
+                logger.info("🤖 Competitive AI: Starting...")
+                self.strategy = CompetitiveAI(self.websocket)
                 self.websocket.on_game_ended = self._on_game_ended
                 
-                # 3. 🔥 Mulai gameplay
                 await self.websocket.receive_loop(self.strategy.handle_message)
                 
-                # 4. Cleanup setelah game ended
                 await self._cleanup()
                 self.game_ended = True
                 logger.info("✅ Game ended - will join next game")
@@ -302,7 +296,7 @@ class Heartbeat:
     
     def _on_game_ended(self):
         """Callback ketika game ended"""
-        logger.info("🏁 Game ended - triggering auto-pilot")
+        logger.info("🏁 Game ended - triggering competitive AI")
         self.game_ended = True
         self.force_join_attempted = False
     
@@ -324,8 +318,8 @@ class Heartbeat:
             self.last_game_id = self.websocket.game_id
             logger.info(f"✅ Resumed game: {self.last_game_id}")
             
-            # 🔥 Start auto-pilot
-            self.strategy = AdaptiveAI(self.websocket)
+            # 🔥 Start competitive AI
+            self.strategy = CompetitiveAI(self.websocket)
             self.websocket.on_game_ended = self._on_game_ended
             await self.websocket.receive_loop(self.strategy.handle_message)
             
@@ -381,8 +375,8 @@ class Heartbeat:
         self.last_game_id = self.websocket.game_id
         logger.info(f"✅ Joined {entry_type} game: {self.last_game_id}")
         
-        logger.info("🤖 Auto-pilot: Starting Adaptive AI...")
-        self.strategy = AdaptiveAI(self.websocket)
+        logger.info("🤖 Competitive AI: Starting...")
+        self.strategy = CompetitiveAI(self.websocket)
         self.websocket.on_game_ended = self._on_game_ended
         await self.websocket.receive_loop(self.strategy.handle_message)
         
