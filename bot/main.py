@@ -18,36 +18,26 @@ async def main():
     print("🦞 CLAW ROYALE AI BOT v2.0")
     print("=" * 60)
     
-    # Cek environment
     if os.getenv("RAILWAY_ENVIRONMENT"):
         print("🏗️  Running on Railway Platform")
         print(f"📦 Service: {os.getenv('RAILWAY_SERVICE_NAME', 'unknown')}")
         print("=" * 60)
     
-    # Validasi API_KEY
     if not Config.validate():
         print("\n⚠️  BOT CANNOT START - Invalid configuration")
         print("\nPlease add these variables in Railway:")
         print("  - API_KEY: your_api_key_here")
-        print("  - AGENT_NAME: MyBotName (optional)")
         print("=" * 60 + "\n")
         sys.exit(1)
     
-    # Buat direktori data
     Config.ensure_directories()
-    
-    # Tampilkan konfigurasi
-    if os.getenv("LOG_LEVEL", "INFO") == "DEBUG":
-        Config.print_config()
     
     print("\n" + "=" * 60)
     print("🤖 Bot is starting...")
     print("📌 Auto-join: ENABLED")
-    print("📌 Auto-rejoin: ENABLED")
     print("📌 Room Mode: " + Config.ROOM_MODE)
     print("=" * 60 + "\n")
     
-    # Start heartbeat
     heartbeat = Heartbeat()
     
     def shutdown_handler():
