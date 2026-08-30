@@ -13,6 +13,10 @@ class GameWebSocket:
         self.game_id = None
         self.is_alive = True
         self.connected = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.base_backoff = 1  # detik
+        self.max_backoff = 30  # detik
         
     async def connect(self, entry_type: str = "free") -> bool:
         try:
@@ -47,6 +51,7 @@ class GameWebSocket:
             
             self.connected = True
             self.is_alive = True
+            self.reconnect_attempts = 0
             return True
             
         except Exception as e:
@@ -70,6 +75,7 @@ class GameWebSocket:
             )
             self.connected = True
             self.is_alive = True
+            self.reconnect_attempts = 0
             logger.info(f"✅ Resumed game")
             return True
             
@@ -78,6 +84,7 @@ class GameWebSocket:
             return False
     
     async def receive_loop(self, message_handler: Callable):
+        """Receive loop dengan exponential backoff"""
         logger.info("🔄 Receive loop started")
         
         try:
@@ -86,6 +93,7 @@ class GameWebSocket:
                     msg = json.loads(await asyncio.wait_for(self.websocket.recv(), timeout=30.0))
                     msg_type = msg.get("type")
                     
+                    # Death detection - meta.youDied
                     if msg_type == "agent_died" and msg.get("meta", {}).get("youDied") == True:
                         logger.info("💀 YOU DIED!")
                         self.is_alive = False
@@ -104,13 +112,55 @@ class GameWebSocket:
                     try:
                         await self.websocket.send(json.dumps({"type": "ping"}))
                     except:
-                        break
+                        # Exponential backoff untuk reconnect
+                        if self.reconnect_attempts < self.max_reconnect_attempts:
+                            wait = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
+                            self.reconnect_attempts += 1
+                            logger.info(f"🔄 Reconnect backoff: {wait}s (attempt {self.reconnect_attempts})")
+                            await asyncio.sleep(wait)
+                            await self._reconnect()
+                            if self.connected:
+                                self.reconnect_attempts = 0
+                        else:
+                            logger.error("❌ Max reconnect attempts reached")
+                            break
                     
         except Exception as e:
             logger.error(f"❌ Receive error: {e}")
         finally:
             self.is_alive = False
             self.connected = False
+            logger.info("🔄 Receive loop ended")
+    
+    async def _reconnect(self):
+        """Reconnect dengan exponential backoff"""
+        try:
+            if self.websocket:
+                await self.websocket.close()
+                self.websocket = None
+            
+            await asyncio.sleep(1)
+            
+            if self.game_id:
+                version = await self.client.get_version()
+                headers = {
+                    "X-API-Key": Config.API_KEY,
+                    "X-Version": version or "1.15.0"
+                }
+                
+                self.websocket = await websockets.connect(
+                    Config.WS_AGENT_URL,
+                    extra_headers=headers,
+                    max_size=10_000_000,
+                    ping_interval=20,
+                    ping_timeout=60
+                )
+                self.connected = True
+                self.is_alive = True
+                logger.info("✅ Reconnected successfully")
+                
+        except Exception as e:
+            logger.error(f"❌ Reconnect failed: {e}")
     
     async def send_action(self, action: Dict) -> bool:
         try:
