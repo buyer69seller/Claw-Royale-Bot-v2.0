@@ -515,7 +515,17 @@ class AdaptiveAI:
             death_zone_radius=radius,
             enemy_positions=enemy_positions
         )
-        
+
+
+        # Di method _execute_action, tambahkan tracking kill:
+elif action_type == ActionType.KILL:
+    await self.websocket.send_action({
+        "type": "attack",
+        "targetId": action["target_id"]
+    })
+    self.kills += 1  # Track kill
+    logger.info(f"⚔️ Attacking target (kill #{self.kills})")
+
         # Move towards better position
         if position_score < 50:
             # Find best direction
