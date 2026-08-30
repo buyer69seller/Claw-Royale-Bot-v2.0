@@ -32,7 +32,8 @@ class Config:
     
     # Bot Settings
     AGENT_NAME = os.getenv("AGENT_NAME", "ClawBot")
-    ROOM_MODE = os.getenv("ROOM_MODE", "free")
+    # ROOM_MODE: free | paid | auto (auto = paid fallback to free)
+    ROOM_MODE = os.getenv("ROOM_MODE", "auto")
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     
     # Railway
