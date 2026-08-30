@@ -1,1 +1,2 @@
-# Game package
+# Game Package
+from .websocket import GameWebSocket
