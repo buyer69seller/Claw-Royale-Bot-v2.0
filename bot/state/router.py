@@ -1,5 +1,4 @@
 from enum import Enum
-from typing import Optional, Dict
 from ..api.client import APIClient
 from ..utils.logger import logger
 
@@ -16,7 +15,6 @@ class StateRouter:
     def __init__(self):
         self.client = APIClient()
         self.state = AgentState.IDLE
-        self.last_readiness = None
         
     async def check_state(self) -> AgentState:
         try:
@@ -37,28 +35,13 @@ class StateRouter:
             data = account.get("data", {})
             games = data.get("currentGames", [])
             
-            # Check slots
-            free_live = any(
-                g.get("entryType") == "free" and g.get("isAlive") == True
-                for g in games
-            )
-            
-            paid_live = any(
-                g.get("entryType") == "paid" and g.get("isAlive") == True
-                for g in games
-            )
+            free_live = any(g.get("entryType") == "free" and g.get("isAlive") == True for g in games)
+            paid_live = any(g.get("entryType") == "paid" and g.get("isAlive") == True for g in games)
             
             readiness = data.get("readiness", {})
             free_ready = readiness.get("freeReady", False)
             paid_ready = readiness.get("paidReady", False)
             
-            # Log changes
-            current = f"free={free_ready}, paid={paid_ready}"
-            if current != self.last_readiness:
-                logger.info(f"📊 Readiness: freeReady={free_ready}, paidReady={paid_ready}")
-                self.last_readiness = current
-            
-            # Determine state (prioritas: IN_GAME > READY > IDLE)
             if free_live:
                 self.state = AgentState.IN_GAME_FREE
                 logger.info("📌 IN_GAME_FREE")
