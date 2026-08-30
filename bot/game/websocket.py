@@ -20,9 +20,12 @@ class GameWebSocket:
         self.max_backoff = 30
         self.on_game_ended = None
         self.self_token = None
-        self.last_agent_view_time = 0  # 🔥 Tracking last agent_view
+        self.last_agent_view_time = 0
+        self.join_attempts = 0
+        self.max_join_attempts = 3
         
     async def connect(self, entry_type: str = "free") -> bool:
+        """Connect ke Claw Royale via /ws/join"""
         try:
             version = await self.client.get_version()
             if not version:
@@ -100,6 +103,13 @@ class GameWebSocket:
             self.agent_id = assigned.get("agentId")
             self.self_token = self.agent_id
             
+            # 🔥 CEK: Jika gameId None, berarti tidak ada game
+            if self.game_id is None:
+                logger.error("❌ No game assigned! gameId is None")
+                logger.info("   ℹ️ This means no game available or server issue")
+                await self.close()
+                return False
+            
             logger.info(f"   ✅ Assigned to game: {self.game_id}")
             if self.self_token:
                 logger.info(f"   🎯 Self-token: {self.self_token}")
@@ -108,13 +118,21 @@ class GameWebSocket:
             self.is_alive = True
             self.reconnect_attempts = 0
             self.last_agent_view_time = asyncio.get_event_loop().time()
+            self.join_attempts = 0
             return True
             
+        except asyncio.TimeoutError:
+            logger.error("❌ Connection timeout!")
+            return False
+        except websockets.WebSocketException as e:
+            logger.error(f"❌ WebSocket error: {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Connection error: {e}")
             return False
     
     async def resume_game(self, entry_type: str) -> bool:
+        """Resume game yang sudah ada"""
         try:
             version = await self.client.get_version()
             if not version:
@@ -172,33 +190,29 @@ class GameWebSocket:
             return False
     
     async def receive_loop(self, message_handler: Callable):
-        """Main receive loop dengan force agent_view request"""
+        """Main receive loop"""
         logger.info("🔄 Receive loop started")
         
         no_agent_view_count = 0
-        max_no_agent_view = 5  # 🔥 Jika 5 turn tanpa agent_view, force request
+        max_no_agent_view = 10
         
         try:
             while self.websocket and self.is_alive and self.connected:
                 try:
-                    # 🔥 Cek apakah ada agent_view dalam 10 detik terakhir
                     current_time = asyncio.get_event_loop().time()
+                    
+                    # 🔥 CEK: Jika tidak ada agent_view dalam 10 detik
                     if current_time - self.last_agent_view_time > 10:
                         no_agent_view_count += 1
-                        logger.warning(f"⚠️ No agent_view for {no_agent_view_count} checks")
                         
-                        # 🔥 Jika terlalu lama tanpa agent_view, kirim request
                         if no_agent_view_count >= max_no_agent_view:
-                            logger.error("❌ No agent_view received! Attempting to request...")
-                            # Kirim ping untuk refresh state
-                            try:
-                                await self.websocket.send(json.dumps({"type": "ping"}))
-                                logger.info("📤 Sent ping to refresh state")
-                            except:
-                                pass
-                            no_agent_view_count = 0
+                            logger.error("❌ No agent_view received! Game may be dead.")
+                            self.is_alive = False
+                            self.connected = False
+                            if self.on_game_ended:
+                                self.on_game_ended()
+                            break
                     
-                    # Wait for message
                     message = await asyncio.wait_for(self.websocket.recv(), timeout=30.0)
                     data = json.loads(message)
                     msg_type = data.get("type")
@@ -209,7 +223,6 @@ class GameWebSocket:
                         no_agent_view_count = 0
                         logger.info(f"📨 [agent_view] Received! Turn: {data.get('turn', 'unknown')}")
                     
-                    # Log semua message (kecuali terlalu sering)
                     if msg_type not in ["agent_view", "turn_advanced"]:
                         logger.info(f"📨 [MSG] Type: {msg_type}")
                     
@@ -244,10 +257,8 @@ class GameWebSocket:
                     logger.warning("⚠️ Receive timeout, sending ping...")
                     try:
                         await self.websocket.send(json.dumps({"type": "ping"}))
-                        logger.debug("💓 Ping sent")
                     except Exception as e:
                         logger.warning(f"⚠️ Ping failed: {e}")
-                        # Reconnect logic
                         if self.reconnect_attempts < self.max_reconnect_attempts:
                             wait = min(self.base_backoff * (2 ** self.reconnect_attempts), self.max_backoff)
                             self.reconnect_attempts += 1
@@ -339,7 +350,6 @@ class GameWebSocket:
     async def send_action(self, action: Dict) -> bool:
         try:
             if not self.websocket or not self.is_alive or not self.connected:
-                logger.warning("⚠️ Cannot send action: not connected or dead")
                 return False
             
             action_type = action.get("type")
