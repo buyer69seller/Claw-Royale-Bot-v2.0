@@ -101,6 +101,10 @@ class APIClient:
                             self.is_logged_in = True
                         return result
                     
+                    if response.status_code == 201:
+                        # Created - untuk redeem
+                        return response.json()
+                    
                     if response.status_code == 401:
                         logger.error("❌ Authentication failed")
                         self.is_logged_in = False
@@ -109,6 +113,10 @@ class APIClient:
                     if response.status_code == 426:
                         await self.get_version()
                         return await self._request(method, endpoint, data, params)
+                    
+                    if response.status_code == 404:
+                        # Endpoint not found - mungkin redeem sudah digunakan
+                        return {"error": "Not found", "success": False}
                     
                     try:
                         error_data = response.json()
@@ -138,4 +146,18 @@ class APIClient:
         return await self._request("GET", "/accounts/me/dashboard/games")
     
     async def redeem_code(self, code: str = "WELCOME") -> Dict:
-        return await self._request("POST", "/api/redeem", data={"code": code})
+        """Redeem code - endpoint mungkin berbeda"""
+        # Coba beberapa endpoint
+        endpoints = [
+            "/api/redeem",
+            "/redeem",
+            "/accounts/me/redeem"
+        ]
+        for endpoint in endpoints:
+            try:
+                result = await self._request("POST", endpoint, data={"code": code})
+                if result.get("success"):
+                    return result
+            except:
+                continue
+        return {"error": "All redeem endpoints failed", "success": False}
