@@ -122,7 +122,6 @@ class APIClient:
         
         return {"error": "All endpoints failed", "success": False}
     
-    # API Methods
     async def get_account(self) -> Dict:
         return await self._request("GET", "/accounts/me")
     
